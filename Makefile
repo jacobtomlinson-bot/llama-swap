@@ -59,8 +59,7 @@ test-all:
 
 # Test suites for the cmd utilities (kubeswap, vllm-wrapper). Kept
 # separate from test-all: those packages are unix-only (vllm-wrapper
-# signals the serve proxy with syscall.Kill), so they must not be part
-# of the target the Windows CI runs.
+# signals the serve proxy with syscall.Kill), so test-all stays portable.
 test-cmd:
 	go test -race -count=1 ./cmd/kubeswap ./cmd/vllm-wrapper
 

@@ -63,6 +63,13 @@ Rates require the underlying server to supply timings or rates recognized by
 the existing usage parser. Token counts alone cannot establish either rate.
 No estimate from total HTTP duration is substituted.
 
+## CI platforms
+
+This fork runs Linux CI and deliberately removes upstream's Windows CI
+workflow. Windows is not a supported deployment target for the fork.
+The standard Go tests still cover platform-independent behavior, including
+same-clock-tick TTFT.
+
 ## Nightly upstream rebase
 
 **Fork nightly upstream sync** runs at 03:27 UTC on the fork's default branch;
@@ -110,7 +117,10 @@ failed-job rerun has expired, dispatch a fresh workflow on the current
 `main`.
 
 The sync uses the repository `GITHUB_TOKEN` only. It intentionally stops
-when `.github/workflows/` changes: workflow-changing pushes may require
+when the rebased workflow tree differs from the current fork's: an unchanged
+upstream Windows workflow stays deleted in a clean rebase; if upstream edits
+it, the delete/modify conflict requires manual resolution. Workflow-changing
+pushes may require
 workflow-write authorization unavailable to the default token, and incoming
 workflow changes warrant manual review anyway. GitHub branch rules must
 permit the bot's leased update; rewritten fork commits lose their previous

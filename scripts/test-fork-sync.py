@@ -16,6 +16,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 FLOOR = "9cc0aecbe7fbf00ea5870992d4c3761127e1be88"
+WINDOWS_CI = ".github/workflows/go-ci-windows.yml"
 JOBS = yaml.safe_load((ROOT / ".github/workflows/fork-sync.yml").read_text())["jobs"]
 ENV = {
     **os.environ,
@@ -85,6 +86,9 @@ def scenario(case, directory):
     git(prep, "fetch", "--no-tags", ROOT, FLOOR)
     git(prep, "checkout", "--detach", FLOOR)
     common = make_merge(prep) if case == "upstream-merge" else FLOOR
+    removes_windows_ci = case in ("windows-ci-deleted", "windows-ci-upstream-edit")
+    if removes_windows_ci:
+        git(prep, "rm", WINDOWS_CI)
     if case == "fork-only-merge":
         old = make_merge(prep)
         assert git(prep, "rev-list", "HEAD", "--", "fixture-merge-only.txt") == old
@@ -98,6 +102,7 @@ def scenario(case, directory):
     upstream_path = {
         "conflict": "fixture-fork.txt",
         "workflow-change": ".github/workflows/fixture.yml",
+        "windows-ci-upstream-edit": WINDOWS_CI,
     }.get(case, "fixture-upstream.txt")
     patch_equivalent = case in ("upstream-copy-present", "upstream-copy-reverted")
     if case == "already-current":
@@ -129,11 +134,14 @@ def scenario(case, directory):
         "fork-only-merge": f"Fork-only merge {old} requires maintainer review",
         "conflict": "Unresolved rebase conflict",
         "workflow-change": "The rebase changes workflow files",
+        "windows-ci-upstream-edit": "Unresolved rebase conflict",
     }
     shell("prepare", "rebase", prep, env, reject=rejects.get(case))
     if case in rejects or case == "already-current":
         assert git(fork, "rev-parse", "main") == old
         assert not output.exists(), "unexpected candidate output"
+        if removes_windows_ci:
+            assert not git(fork, "ls-tree", "main", "--", WINDOWS_CI)
         if case == "fork-only-merge":
             assert git(prep, "rev-parse", "HEAD") == old
             assert git(fork, "show", "main:fixture-merge-only.txt") == "Present only in the merge tree"
@@ -184,6 +192,8 @@ def scenario(case, directory):
     assert git(fork, "rev-parse", "main") == expected
     if patch_equivalent:
         assert git(fork, "show", "main:fixture-fork.txt") == "Fork edit"
+    if removes_windows_ci:
+        assert not git(fork, "ls-tree", "main", "--", WINDOWS_CI)
 
 
 if __name__ == "__main__":
@@ -197,6 +207,8 @@ if __name__ == "__main__":
         "already-current",
         "conflict",
         "workflow-change",
+        "windows-ci-deleted",
+        "windows-ci-upstream-edit",
         "fork-race",
         "upstream-race",
     ):
