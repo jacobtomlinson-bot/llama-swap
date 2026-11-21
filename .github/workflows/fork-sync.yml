@@ -38,18 +38,27 @@ jobs:
       - name: Rebase the event's fork main onto the fetched upstream main
         id: rebase
         run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git fetch --no-tags "$UPSTREAM_URL" refs/heads/main
           upstream=$(git rev-parse FETCH_HEAD)
           echo "Upstream main: $upstream; fork main: $GITHUB_SHA"
           # Refuse unexpected history unrelated to the fork's original base.
           git merge-base --is-ancestor 9cc0aecbe7fbf00ea5870992d4c3761127e1be88 "$upstream"
-          if git merge-base --is-ancestor "$upstream" HEAD; then
+          # Recreating a merge can discard edits recorded only in its tree.
+          # Subtract all upstream-reachable history, not only its first parents.
+          fork_merge=$(git rev-list --max-count=1 --merges "$upstream..$GITHUB_SHA")
+          if [[ -n "$fork_merge" ]]; then
+            echo "::error::Fork-only merge $fork_merge requires maintainer review. Follow FORK_FEATURES.md; main was not updated."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$upstream" "$GITHUB_SHA"; then
             echo "Upstream main is already included." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if ! git -c user.name=github-actions\[bot\] \
                    -c user.email=41898282+github-actions\[bot\]@users.noreply.github.com \
-                   -c core.hooksPath=/dev/null -c rerere.enabled=false rebase --rebase-merges "$upstream"; then
+                   -c core.hooksPath=/dev/null -c rerere.enabled=false \
+                   rebase --no-fork-point --no-rebase-merges "$upstream"; then
             if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
               echo "::error::Unresolved rebase conflict: follow FORK_FEATURES.md. main was not updated."
               git status --short

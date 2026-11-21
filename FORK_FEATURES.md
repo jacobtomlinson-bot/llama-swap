@@ -70,11 +70,15 @@ check the workflow's status in Actions and
 [re-enable it](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows#enabling-a-workflow)
 there if needed.
 
-A read-only preparation job fetches upstream `main` and rebases the fork
-snapshot. If already current, it does nothing. Otherwise, before any candidate
-code runs, it uploads an immutable Git bundle and records its artifact ID and
-candidate SHA. A separate read-only job verifies the bundle, checks out that
-SHA, and runs the Go race suite, utility and UI tests, and native build.
+A read-only preparation job fetches upstream `main` and rebases the fork's
+linear commits. Use squash merges or rebase merges for fork PRs so `main`
+stays linear above upstream. Sync stops if any merge commit would need to be
+replayed: recreating it can lose changes made only in the original merge.
+Merges already reachable from upstream are not replayed or rejected.
+If the fork is eligible and already current, the job does nothing.
+Otherwise, before any candidate code runs, it uploads an immutable Git
+bundle and records its artifact ID and candidate SHA. A separate read-only
+job verifies the bundle, checks out that SHA, and runs the Go race suite, utility and UI tests, and native build.
 Only after tests pass, a fresh job with `contents: write` verifies the same
 preparation outputs and bundle without executing the rebased code. It checks
 upstream did not move, then updates only the fork's `main` with a lease on the
@@ -115,10 +119,21 @@ that remove that base.
    `mostlygeek/llama-swap`. Run `git fetch --no-tags origin main` and
    `git fetch --no-tags upstream main`. Record `old=$(git rev-parse origin/main)`
    and `base=$(git rev-parse upstream/main)`.
-2. Create a review branch at `$old` and run
-   `git rebase --rebase-merges "$base"`. For a conflict use `git status`,
-   inspect both changes and the fork's intent, and edit/add the resolution
-   before `git rebase --continue`. Use `git rebase --abort` if uncertain.
+2. For linear fork history, create a review branch at `$old` and run
+   `git rebase --no-fork-point --no-rebase-merges "$base"`. If the job found
+   a fork-only merge, do **not** rebase that history directly. Keep `$old`
+   and inspect `git rev-list --merges "$base..$old"`, including any edits made
+   only in the recorded merge trees. With a single known common ancestor
+   from `git merge-base --all "$old" "$base"`, one recovery is to start a
+   fresh review branch at that ancestor and run `git merge --squash "$old"`.
+   Before committing, require `git diff --cached --exit-code "$old" --` to
+   prove that the staged tree preserves the entire old tip, including
+   merge-only edits. Commit the reviewed snapshot with your signing identity
+   and rebase that linear candidate onto `$base` using the command above.
+   If there is no single trusted ancestor, stop and reconcile the history
+   manually. For a rebase conflict use `git status`, inspect both changes
+   and the fork's intent, and edit/add the resolution before
+   `git rebase --continue`. Use `git rebase --abort` if uncertain.
    For workflow changes that Git merged cleanly, inspect
    `git diff "$old" HEAD -- .github/workflows/` and verify the repository and
    branch guards, pinned actions and job token permissions still hold.
@@ -136,6 +151,9 @@ that remove that base.
 
 ### Verify after every rebase
 
+- When changing the sync workflow, run `python3 scripts/test-fork-sync.py`
+  with PyYAML installed. It exercises the workflow's Git steps against local
+  disposable repos, including merge-only changes and concurrent updates.
 - Confirm `git merge-base --is-ancestor <upstream-sha-from-sync> origin/main`
   and inspect the remaining fork diff. For a local candidate substitute
   `HEAD` for `origin/main`. Run
