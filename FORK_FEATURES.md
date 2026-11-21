@@ -3,18 +3,25 @@
 ## Container
 
 A push to this fork's `main` runs **Fork latest image**. It builds the
-checked-out fork revision with `make native` (including the web UI), smoke
-tests the image, publishes a `sha-<commit>` tag to
-`ghcr.io/jacobtomlinson-bot/llama-swap`, then points `:latest` at that digest.
-It is a Linux/amd64 CPU image using the llama.cpp server base. It includes a
-small example model config, replaceable with a bind mount at `/app/config.yaml`;
-it does not bundle models or GPU backends. The example downloads its model on
-first use. The GitHub package may initially be private: authenticate to pull it,
-or have the package owner separately choose its visibility and Actions access.
+checked-out fork revision with `make native` (including the web UI) and smoke
+tests the image in a read-only job. A fresh publisher downloads that image by
+immutable artifact ID from the same run, checks its image ID, revision, and
+platform, and publishes a `sha-<commit>` tag to
+`ghcr.io/jacobtomlinson-bot/llama-swap` before promoting its digest to
+`:latest`. Only the publisher gets registry write credentials; it neither
+checks out the repository nor runs the image. This isolates credentials, not
+the trustworthiness of the built image. It is a Linux/amd64 CPU image pinned
+to a llama.cpp server base digest; review and update that pin when upgrading
+the bundled server. It includes a small example config that can be replaced
+by a bind mount at `/app/config.yaml`. The image does not bundle models or GPU
+backends; the example downloads its model on first use. The GitHub package
+may initially be private: authenticate to pull it, or have the package owner
+separately choose its visibility and Actions access.
 
 Only this fork's `main` can publish this tag. Publication jobs are serialized
-and compare their source SHA to live `main` before building and again before
-promoting `:latest`. Superseded builds can leave a revision tag, but cannot
+and compare their source SHA to live `main` before loading the artifact and
+again before promoting `:latest`. The build also skips work if its SHA is
+already stale. Superseded builds can leave a revision tag, but cannot
 overwrite a newer job's published `:latest`. Git and GHCR don't share an
 atomic transaction: `:latest` can lag a push while the new build runs, and
 continues to point to the last good build on failure. Use the revision label or
@@ -57,24 +64,38 @@ No estimate from total HTTP duration is substituted.
 ## Nightly upstream rebase
 
 **Fork nightly upstream sync** runs at 03:27 UTC on the fork's default branch;
-it can also be dispatched manually on `main`. Its test job fetches upstream
-`main`, rebases the fork snapshot and runs the Go race suite, utility and UI
-tests, and native build with read-only permissions. If already current, it
-does nothing. A separate job with `contents: write` validates the tested
-Git bundle without running the rebased code, checks upstream didn't move, then
-updates only the fork's `main` with an explicit lease on the tested starting
-SHA. If another push wins, the lease fails; run again from fresh refs rather
-than overriding it.
+it can also be dispatched manually on `main`. GitHub can disable scheduled
+workflows in a public repository after 60 days of repository inactivity;
+check the workflow's status in Actions and
+[re-enable it](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows#enabling-a-workflow)
+there if needed.
 
-Clean Git three-way merges (nonoverlapping edits or identical changes Git can
-combine) are accepted only after tests. Any remaining conflict is treated as
-requiring semantic review; the job does not pick one side globally, apply
-`rerere`, or publish a partially resolved branch. A conflict, test failure,
-workflow-file change, or fork lease failure leaves the previous fork `main`
-untouched by the job. A successful token-authenticated update does **not**
+A read-only preparation job fetches upstream `main` and rebases the fork
+snapshot. If already current, it does nothing. Otherwise, before any candidate
+code runs, it uploads an immutable Git bundle and records its artifact ID and
+candidate SHA. A separate read-only job verifies the bundle, checks out that
+SHA, and runs the Go race suite, utility and UI tests, and native build.
+Only after tests pass, a fresh job with `contents: write` verifies the same
+preparation outputs and bundle without executing the rebased code. It checks
+upstream did not move, then updates only the fork's `main` with a lease on the
+starting SHA. Tests do not select what gets pushed. This binds the update to
+one commit, not the trustworthiness of upstream code or its tests. If another
+push wins, the lease fails; run again from fresh refs rather than overriding it.
+
+Git automatically combines nonoverlapping edits and identical changes when
+its normal three-way rebase can do so cleanly; those candidates still need to
+pass tests. If Git reports any unresolved conflict, automation stops and a
+maintainer must resolve it on a review branch. There is no automatic
+resolution for overlapping changes Git cannot combine, and the job does not
+pick one side, apply `rerere`, or publish a partially resolved branch. A
+conflict, test failure, workflow-file change, or fork lease failure leaves the
+previous fork `main` untouched by the job. A successful token-authenticated update does **not**
 fire push workflows; a separate job with `actions: write` dispatches **Fork
 latest image** on the current fork `main`. If dispatch fails after the update,
 rerun that failed job or dispatch the image workflow manually on `main`.
+Image and sync artifacts expire after one day. If an artifact needed by a
+failed-job rerun has expired, dispatch a fresh workflow on the current
+`main`.
 
 The sync uses the repository `GITHUB_TOKEN` only. It intentionally stops
 when `.github/workflows/` changes: workflow-changing pushes may require

@@ -19,10 +19,10 @@ env:
   UPSTREAM_URL: https://github.com/mostlygeek/llama-swap.git
 
 jobs:
-  test:
+  prepare:
     if: github.repository == 'jacobtomlinson-bot/llama-swap' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
@@ -32,6 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Rebase the event's fork main onto the fetched upstream main
@@ -48,7 +49,7 @@ jobs:
           fi
           if ! git -c user.name=github-actions\[bot\] \
                    -c user.email=41898282+github-actions\[bot\]@users.noreply.github.com \
-                   -c rerere.enabled=false rebase --rebase-merges "$upstream"; then
+                   -c core.hooksPath=/dev/null -c rerere.enabled=false rebase --rebase-merges "$upstream"; then
             if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
               echo "::error::Unresolved rebase conflict: follow FORK_FEATURES.md. main was not updated."
               git status --short
@@ -66,47 +67,76 @@ jobs:
             exit 1
           fi
           echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
-          git rev-parse HEAD > "$RUNNER_TEMP/rebase-candidate"
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - name: Bundle the exact candidate before any test code runs
+        id: bundle
         if: steps.rebase.outputs.upstream != ''
+        run: |
+          candidate=$(git rev-parse HEAD)
+          git branch fork-sync-candidate "$candidate"
+          git bundle create "$RUNNER_TEMP/candidate.bundle" refs/heads/fork-sync-candidate "^${GITHUB_SHA}"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+      - name: Upload the immutable candidate Git bundle
+        id: upload
+        if: steps.rebase.outputs.upstream != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fork-sync-candidate-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate.bundle
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    needs: prepare
+    if: needs.prepare.outputs.candidate != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require one exact artifact ID
+        env:
+          ARTIFACT_ID: ${{ needs.prepare.outputs.artifact }}
+        run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact }}
+          digest-mismatch: error
+          path: ${{ runner.temp }}/fork-sync
+      - name: Verify and check out the preselected candidate
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+        run: |
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          bundle="$RUNNER_TEMP/fork-sync/candidate.bundle"
+          git bundle verify "$bundle"
+          git -c fetch.fsckObjects=true fetch --no-tags "$bundle" refs/heads/fork-sync-candidate
+          test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
+          git -c core.hooksPath=/dev/null checkout --detach "$CANDIDATE"
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
           cache: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        if: steps.rebase.outputs.upstream != ''
         with:
           node-version: "24"
-      - name: Test the rebased revision with read-only permissions
-        if: steps.rebase.outputs.upstream != ''
+          package-manager-cache: false
+      - name: Test the prepared revision with read-only permissions
         run: |
           make simple-responder
           make test-all
           make test-cmd
           make test-ui
           CGO_ENABLED=0 make native
-      - name: Bundle the precise tested revision
-        id: bundle
-        if: steps.rebase.outputs.upstream != ''
-        run: |
-          candidate=$(cat "$RUNNER_TEMP/rebase-candidate")
-          test "$(git rev-parse HEAD)" = "$candidate"
-          test -z "$(git status --porcelain --untracked-files=no)"
-          git branch fork-sync-tested "$candidate"
-          git bundle create "$RUNNER_TEMP/tested.bundle" refs/heads/fork-sync-tested "^${GITHUB_SHA}"
-          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
-      - name: Upload tested Git objects
-        id: upload
-        if: steps.rebase.outputs.upstream != ''
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: fork-sync-tested-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/tested.bundle
-          if-no-files-found: error
-          retention-days: 1
 
   update-main:
-    needs: test
-    if: needs.test.outputs.candidate != ''
+    # Only the prepare job selects the artifact and SHA; tests gate the update.
+    needs: [prepare, test]
+    if: needs.prepare.outputs.candidate != '' && needs.test.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -115,20 +145,26 @@ jobs:
       # Never check out or execute the candidate in this privileged job.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+      - name: Require one exact artifact ID
+        env:
+          ARTIFACT_ID: ${{ needs.prepare.outputs.artifact }}
+        run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          artifact-ids: ${{ needs.test.outputs.artifact }}
+          artifact-ids: ${{ needs.prepare.outputs.artifact }}
+          digest-mismatch: error
           path: ${{ runner.temp }}/fork-sync
       - name: Verify candidate and compare-and-swap fork main
         env:
-          CANDIDATE: ${{ needs.test.outputs.candidate }}
-          UPSTREAM: ${{ needs.test.outputs.upstream }}
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+          UPSTREAM: ${{ needs.prepare.outputs.upstream }}
         run: |
           [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ && "$UPSTREAM" =~ ^[0-9a-f]{40}$ ]]
-          bundle="$RUNNER_TEMP/fork-sync/tested.bundle"
+          bundle="$RUNNER_TEMP/fork-sync/candidate.bundle"
           git bundle verify "$bundle"
-          git -c fetch.fsckObjects=true fetch --no-tags "$bundle" refs/heads/fork-sync-tested
+          git -c fetch.fsckObjects=true fetch --no-tags "$bundle" refs/heads/fork-sync-candidate
           test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
           git merge-base --is-ancestor "$UPSTREAM" "$CANDIDATE"
           git diff --quiet "$GITHUB_SHA" "$CANDIDATE" -- .github/workflows/
@@ -143,7 +179,7 @@ jobs:
           echo "Updated fork main to $CANDIDATE on upstream $UPSTREAM." >> "$GITHUB_STEP_SUMMARY"
 
   dispatch-image:
-    needs: [test, update-main]
+    needs: update-main
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

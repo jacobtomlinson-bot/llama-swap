@@ -12,20 +12,21 @@ defaults:
   run:
     shell: bash
 
+env:
+  IMAGE: ghcr.io/jacobtomlinson-bot/llama-swap
+  MAIN_URL: https://github.com/jacobtomlinson-bot/llama-swap.git
+
 jobs:
-  build-and-publish:
+  build:
     if: github.repository == 'jacobtomlinson-bot/llama-swap' && github.ref == 'refs/heads/main' && !github.event.deleted
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    concurrency:
-      group: fork-image-latest
-      queue: max
     permissions:
       contents: read
-      packages: write
-    env:
-      IMAGE: ghcr.io/jacobtomlinson-bot/llama-swap
-      MAIN_URL: https://github.com/jacobtomlinson-bot/llama-swap.git
+    outputs:
+      current: ${{ steps.current.outputs.current }}
+      image-id: ${{ steps.save.outputs.image-id }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - name: Check whether this commit is still current
         id: current
@@ -39,18 +40,22 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.current.outputs.current == 'true'
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         if: steps.current.outputs.current == 'true'
         with:
           go-version-file: go.mod
+          cache: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         if: steps.current.outputs.current == 'true'
         with:
           node-version: "24"
+          package-manager-cache: false
       - name: Build and smoke-test the fork image
         if: steps.current.outputs.current == 'true'
         run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           CGO_ENABLED=0 make native GOOS=linux GOARCH=amd64
           context=$(mktemp -d)
           install -m 755 build/llama-swap-linux-amd64 "$context/llama-swap"
@@ -73,6 +78,68 @@ jobs:
           done
           docker logs "$container"
           exit 1
+      - name: Export the smoke-tested image
+        id: save
+        if: steps.current.outputs.current == 'true'
+        run: |
+          revision="$IMAGE:sha-$GITHUB_SHA"
+          image_id=$(docker image inspect --format '{{.Id}}' "$revision")
+          docker save --output "$RUNNER_TEMP/fork-image.tar" "$revision"
+          echo "image-id=$image_id" >> "$GITHUB_OUTPUT"
+      - name: Upload the image from this run
+        id: upload
+        if: steps.current.outputs.current == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fork-image-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fork-image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: github.repository == 'jacobtomlinson-bot/llama-swap' && github.ref == 'refs/heads/main' && needs.build.outputs.current == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: fork-image-latest
+      queue: max
+    permissions:
+      packages: write
+    steps:
+      # No source checkout or candidate code/image execution on this runner.
+      - name: Check live main and validate the artifact selector
+        id: current
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+        run: |
+          ref=$(git ls-remote --exit-code "$MAIN_URL" refs/heads/main)
+          if [[ "${ref%%$'\t'*}" == "$GITHUB_SHA" ]]; then
+            [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping stale main commit $GITHUB_SHA"
+          fi
+      - name: Download the image by immutable artifact ID from this run
+        if: steps.current.outputs.current == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          digest-mismatch: error
+          path: ${{ runner.temp }}/fork-image
+      - name: Import and verify the exact tagged image without running it
+        if: steps.current.outputs.current == 'true'
+        env:
+          EXPECTED_IMAGE_ID: ${{ needs.build.outputs.image-id }}
+        run: |
+          [[ "$EXPECTED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker load --input "$RUNNER_TEMP/fork-image/fork-image.tar"
+          revision="$IMAGE:sha-$GITHUB_SHA"
+          metadata=$(docker image inspect --format '{{.Id}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{.Os}}/{{.Architecture}}' "$revision")
+          if [[ "$metadata" != "$EXPECTED_IMAGE_ID $GITHUB_SHA linux/amd64" ]]; then
+            echo "::error::Artifact does not contain the expected image ID, revision and platform"
+            exit 1
+          fi
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         if: steps.current.outputs.current == 'true'
         with:
