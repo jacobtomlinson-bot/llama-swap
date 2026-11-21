@@ -1,0 +1,155 @@
+name: Fork nightly upstream sync
+
+on:
+  schedule:
+    - cron: "27 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: fork-main-upstream-sync
+  queue: max
+
+env:
+  UPSTREAM_URL: https://github.com/mostlygeek/llama-swap.git
+
+jobs:
+  test:
+    if: github.repository == 'jacobtomlinson-bot/llama-swap' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      candidate: ${{ steps.bundle.outputs.candidate }}
+      upstream: ${{ steps.rebase.outputs.upstream }}
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Rebase the event's fork main onto the fetched upstream main
+        id: rebase
+        run: |
+          git fetch --no-tags "$UPSTREAM_URL" refs/heads/main
+          upstream=$(git rev-parse FETCH_HEAD)
+          echo "Upstream main: $upstream; fork main: $GITHUB_SHA"
+          # Refuse unexpected history unrelated to the fork's original base.
+          git merge-base --is-ancestor 9cc0aecbe7fbf00ea5870992d4c3761127e1be88 "$upstream"
+          if git merge-base --is-ancestor "$upstream" HEAD; then
+            echo "Upstream main is already included." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! git -c user.name=github-actions\[bot\] \
+                   -c user.email=41898282+github-actions\[bot\]@users.noreply.github.com \
+                   -c rerere.enabled=false rebase --rebase-merges "$upstream"; then
+            if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
+              echo "::error::Unresolved rebase conflict: follow FORK_FEATURES.md. main was not updated."
+              git status --short
+            else
+              echo "::error::Rebase failed; inspect the git error above. main was not updated."
+            fi
+            git rebase --abort || true
+            exit 1
+          fi
+          # GITHUB_TOKEN may be refused when introducing/modifying workflow
+          # files. Require maintainer review regardless of server behavior.
+          if ! git diff --quiet "$GITHUB_SHA" HEAD -- .github/workflows/; then
+            echo "::error::The rebase changes workflow files. Follow the maintainer procedure in FORK_FEATURES.md."
+            git diff --name-status "$GITHUB_SHA" HEAD -- .github/workflows/
+            exit 1
+          fi
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/rebase-candidate"
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        if: steps.rebase.outputs.upstream != ''
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        if: steps.rebase.outputs.upstream != ''
+        with:
+          node-version: "24"
+      - name: Test the rebased revision with read-only permissions
+        if: steps.rebase.outputs.upstream != ''
+        run: |
+          make simple-responder
+          make test-all
+          make test-cmd
+          make test-ui
+          CGO_ENABLED=0 make native
+      - name: Bundle the precise tested revision
+        id: bundle
+        if: steps.rebase.outputs.upstream != ''
+        run: |
+          candidate=$(cat "$RUNNER_TEMP/rebase-candidate")
+          test "$(git rev-parse HEAD)" = "$candidate"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          git branch fork-sync-tested "$candidate"
+          git bundle create "$RUNNER_TEMP/tested.bundle" refs/heads/fork-sync-tested "^${GITHUB_SHA}"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+      - name: Upload tested Git objects
+        id: upload
+        if: steps.rebase.outputs.upstream != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fork-sync-tested-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tested.bundle
+          if-no-files-found: error
+          retention-days: 1
+
+  update-main:
+    needs: test
+    if: needs.test.outputs.candidate != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # Never check out or execute the candidate in this privileged job.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          artifact-ids: ${{ needs.test.outputs.artifact }}
+          path: ${{ runner.temp }}/fork-sync
+      - name: Verify candidate and compare-and-swap fork main
+        env:
+          CANDIDATE: ${{ needs.test.outputs.candidate }}
+          UPSTREAM: ${{ needs.test.outputs.upstream }}
+        run: |
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ && "$UPSTREAM" =~ ^[0-9a-f]{40}$ ]]
+          bundle="$RUNNER_TEMP/fork-sync/tested.bundle"
+          git bundle verify "$bundle"
+          git -c fetch.fsckObjects=true fetch --no-tags "$bundle" refs/heads/fork-sync-tested
+          test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
+          git merge-base --is-ancestor "$UPSTREAM" "$CANDIDATE"
+          git diff --quiet "$GITHUB_SHA" "$CANDIDATE" -- .github/workflows/
+          ref=$(git ls-remote --exit-code "$UPSTREAM_URL" refs/heads/main)
+          if [[ "${ref%%$'\t'*}" != "$UPSTREAM" ]]; then
+            echo "::error::Upstream main moved during testing; retry against fresh heads."
+            exit 1
+          fi
+          git -c core.hooksPath=/dev/null push --no-follow-tags \
+            --force-with-lease="refs/heads/main:$GITHUB_SHA" \
+            origin "$CANDIDATE:refs/heads/main"
+          echo "Updated fork main to $CANDIDATE on upstream $UPSTREAM." >> "$GITHUB_STEP_SUMMARY"
+
+  dispatch-image:
+    needs: [test, update-main]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the image workflow for the current fork main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run fork-image.yml --repo "$GITHUB_REPOSITORY" --ref main

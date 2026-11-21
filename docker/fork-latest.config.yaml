@@ -1,0 +1,4 @@
+healthCheckTimeout: 300
+models:
+  smollm2:
+    cmd: /app/llama-server -hf bartowski/SmolLM2-135M-Instruct-GGUF:Q4_K_M --port ${PORT}

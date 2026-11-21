@@ -86,6 +86,16 @@ func CreateMetricsMiddleware(mm *metricsMonitor, cfg config.Config) chain.Middle
 			r = r.WithContext(ctx)
 
 			recorder := newBodyCopier(w)
+			if task == hint.TaskChat {
+				// ModelID has already resolved any local aliases and profile or
+				// selector rewrites. Canonicalize the optional shorthand for
+				// an unambiguous peer model, and never label by unknown input.
+				if _, local := cfg.Models[data.ModelID]; local {
+					recorder.prometheusModel = data.ModelID
+				} else if peerID, modelID, found := cfg.ResolvePeerModel(data.ModelID); found {
+					recorder.prometheusModel = config.PeerModelFQN(peerID, modelID)
+				}
+			}
 			if websocket {
 				recorder.realtime = newRealtimeSession()
 			}

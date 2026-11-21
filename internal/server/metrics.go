@@ -18,6 +18,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/event"
 	"github.com/mostlygeek/llama-swap/internal/hint"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/internal/perf"
 	"github.com/mostlygeek/llama-swap/internal/server/usage"
 	"github.com/mostlygeek/llama-swap/internal/store"
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
@@ -52,6 +53,7 @@ type metricsMonitor struct {
 	logger          *logmon.Monitor
 	enableCaptures  bool
 	maxCaptureBytes int64
+	prometheus      perf.ModelMetrics
 
 	// pruneCh wakes the prune goroutine. It holds one pending request, so
 	// many captures written while a prune runs cause one more prune, not
@@ -351,11 +353,20 @@ func (mp *metricsMonitor) record(modelID string, task hint.Task, r *http.Request
 		body = decoded
 	}
 
-	if u, err := usage.Extract(upstream, r.URL.Path, recorder.Header().Get("Content-Type"), body, recorder.StartTime()); err != nil {
+	u, err := usage.Extract(upstream, r.URL.Path, recorder.Header().Get("Content-Type"), body, recorder.StartTime())
+	if err != nil {
 		mp.logger.Warnf("metrics: %v, path=%s, recording minimal metrics", err, r.URL.Path)
 	} else if u.Found {
 		tm.Tokens = u.Tokens
 		tm.DurationMs = u.DurationMs
+	}
+
+	if recorder.prometheusModel != "" && r.Context().Err() == nil {
+		prefill, generation := -1.0, -1.0
+		if err == nil && u.Found {
+			prefill, generation = u.Tokens.PromptPerSecond, u.Tokens.TokensPerSecond
+		}
+		mp.prometheus.Observe(recorder.prometheusModel, recorder.firstOutput.Seconds(), prefill, generation)
 	}
 
 	tm.CaptureID = mp.newCaptureID(tm.Timestamp)
@@ -507,6 +518,12 @@ type responseBodyCopier struct {
 	wroteHeader bool
 	start       time.Time
 
+	prometheusModel string
+	firstOutput     time.Duration
+	// Both offsets refer into body. The scan offset avoids repeatedly
+	// scanning an incomplete line split across many writes.
+	sseLineStart, sseScanned int
+
 	// realtime, when set, taps the connection Hijack hands out so a
 	// /v1/realtime websocket can be tallied. See realtime.go.
 	realtime *realtimeSession
@@ -533,7 +550,33 @@ func (w *responseBodyCopier) Write(b []byte) (int, error) {
 	if w.status == http.StatusSwitchingProtocols {
 		return w.ResponseWriter.Write(b)
 	}
-	return w.tee.Write(b)
+	n, err := w.tee.Write(b)
+	if err == nil && n > 0 && w.prometheusModel != "" && w.firstOutput == 0 &&
+		w.status == http.StatusOK && usage.IsEventStream(w.Header().Get("Content-Type")) {
+		encoding := strings.TrimSpace(w.Header().Get("Content-Encoding"))
+		if encoding == "" || strings.EqualFold(encoding, "identity") {
+			w.observeFirstOutput()
+		}
+	}
+	return n, err
+}
+
+func (w *responseBodyCopier) observeFirstOutput() {
+	body := w.body.Bytes()
+	for w.sseScanned < len(body) {
+		nl := bytes.IndexByte(body[w.sseScanned:], '\n')
+		if nl == -1 {
+			w.sseScanned = len(body)
+			return
+		}
+		end := w.sseScanned + nl
+		if usage.SSELineHasOutput(body[w.sseLineStart:end]) {
+			w.firstOutput = time.Since(w.start)
+			return
+		}
+		w.sseScanned = end + 1
+		w.sseLineStart = w.sseScanned
+	}
 }
 
 func (w *responseBodyCopier) WriteHeader(statusCode int) {

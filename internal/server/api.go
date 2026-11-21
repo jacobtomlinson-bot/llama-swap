@@ -436,6 +436,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.perf.MetricsHandler().ServeHTTP(w, r)
+	if s.metrics != nil {
+		s.metrics.prometheus.WritePrometheus(w)
+	}
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
