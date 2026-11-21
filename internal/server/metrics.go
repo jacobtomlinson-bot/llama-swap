@@ -366,7 +366,7 @@ func (mp *metricsMonitor) record(modelID string, task hint.Task, r *http.Request
 		if err == nil && u.Found {
 			prefill, generation = u.Tokens.PromptPerSecond, u.Tokens.TokensPerSecond
 		}
-		mp.prometheus.Observe(recorder.prometheusModel, recorder.firstOutput.Seconds(), prefill, generation)
+		mp.prometheus.Observe(recorder.prometheusModel, recorder.ttftSeconds(), prefill, generation)
 	}
 
 	tm.CaptureID = mp.newCaptureID(tm.Timestamp)
@@ -519,7 +519,7 @@ type responseBodyCopier struct {
 	start       time.Time
 
 	prometheusModel string
-	firstOutput     time.Duration
+	firstOutputAt   time.Time
 	// Both offsets refer into body. The scan offset avoids repeatedly
 	// scanning an incomplete line split across many writes.
 	sseLineStart, sseScanned int
@@ -551,7 +551,7 @@ func (w *responseBodyCopier) Write(b []byte) (int, error) {
 		return w.ResponseWriter.Write(b)
 	}
 	n, err := w.tee.Write(b)
-	if err == nil && n > 0 && w.prometheusModel != "" && w.firstOutput == 0 &&
+	if err == nil && n > 0 && w.prometheusModel != "" && w.firstOutputAt.IsZero() &&
 		w.status == http.StatusOK && usage.IsEventStream(w.Header().Get("Content-Type")) {
 		encoding := strings.TrimSpace(w.Header().Get("Content-Encoding"))
 		if encoding == "" || strings.EqualFold(encoding, "identity") {
@@ -571,12 +571,21 @@ func (w *responseBodyCopier) observeFirstOutput() {
 		}
 		end := w.sseScanned + nl
 		if usage.SSELineHasOutput(body[w.sseLineStart:end]) {
-			w.firstOutput = time.Since(w.start)
+			w.firstOutputAt = time.Now()
 			return
 		}
 		w.sseScanned = end + 1
 		w.sseLineStart = w.sseScanned
 	}
+}
+
+// ttftSeconds returns -1 when no output was observed. A timer tick can span
+// both request start and first output, so zero elapsed time is an observation.
+func (w *responseBodyCopier) ttftSeconds() float64 {
+	if w.firstOutputAt.IsZero() {
+		return -1
+	}
+	return w.firstOutputAt.Sub(w.start).Seconds()
 }
 
 func (w *responseBodyCopier) WriteHeader(statusCode int) {

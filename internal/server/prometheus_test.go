@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/mostlygeek/llama-swap/internal/config"
@@ -34,6 +35,10 @@ models:
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":")
 			fmt.Fprint(w, "\"first text\"}}]}\r\n\r\n")
 			fmt.Fprint(w, "data: {\"timings\":{\"prompt_per_second\":200,\"predicted_per_second\":40}}\n\ndata: [DONE]\n\n")
+		case "no-text-stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
+			fmt.Fprint(w, "data: {\"timings\":{\"prompt_per_second\":150,\"predicted_per_second\":30}}\n\ndata: [DONE]\n\n")
 		case "failed":
 			w.WriteHeader(http.StatusBadGateway)
 			fmt.Fprint(w, `{"timings":{"prompt_per_second":999,"predicted_per_second":999}}`)
@@ -80,7 +85,7 @@ models:
 	post("/v1/chat/completions", "nick", "stream", http.StatusOK)
 	post("/v1/chat/completions", "nick", "no-rates", http.StatusOK)
 	post("/v1/chat/completions", "canonical", "failed", http.StatusBadGateway)
-	post("/v1/chat/completions", "other", "", http.StatusOK)
+	post("/v1/chat/completions", "other", "no-text-stream", http.StatusOK)
 	post("/v1/embeddings", "canonical", "", http.StatusOK)
 	// Even a successful reply from a permissive router cannot put an
 	// unknown request model into the Prometheus label set.
@@ -99,16 +104,24 @@ models:
 }
 
 func TestResponseBodyCopier_FirstOutput(t *testing.T) {
-	rec := newBodyCopier(httptest.NewRecorder())
-	rec.prometheusModel = "m"
-	rec.Header().Set("Content-Type", "text/event-stream")
-	fmt.Fprint(rec, ": comment\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
-	assert.Zero(t, rec.firstOutput)
-	fmt.Fprint(rec, "data: {\"choices\":[{\"delta\":{\"content\":\"hel")
-	assert.Zero(t, rec.firstOutput)
-	fmt.Fprint(rec, "lo\"}}]}\n\n")
-	first := rec.firstOutput
-	require.Positive(t, first)
-	fmt.Fprint(rec, "data: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\n")
-	assert.Equal(t, first, rec.firstOutput)
+	for _, elapsed := range []time.Duration{0, 6 * time.Millisecond} {
+		t.Run(elapsed.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				rec := newBodyCopier(httptest.NewRecorder())
+				rec.prometheusModel = "m"
+				rec.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(rec, ": comment\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
+				assert.Equal(t, -1.0, rec.ttftSeconds())
+				fmt.Fprint(rec, "data: {\"choices\":[{\"delta\":{\"content\":\"hel")
+				assert.Equal(t, -1.0, rec.ttftSeconds())
+				time.Sleep(elapsed)
+				fmt.Fprint(rec, "lo\"}}]}\n\n")
+				require.Equal(t, elapsed.Seconds(), rec.ttftSeconds())
+				// A later delta must not replace the first, even when it measured 0.
+				time.Sleep(time.Millisecond)
+				fmt.Fprint(rec, "data: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\n")
+				assert.Equal(t, elapsed.Seconds(), rec.ttftSeconds())
+			})
+		})
+	}
 }

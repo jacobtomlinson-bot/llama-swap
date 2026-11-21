@@ -57,6 +57,8 @@ It is measured at the proxy writer and uses the first recognizable, complete
 single-line JSON text delta in an uncompressed SSE stream. Role-only, loading,
 reasoning-only, tool-only and usage-only frames don't count. Buffered output,
 compressed or unrecognized streams and WebSocket audio do not yield TTFT.
+An observed delta can have TTFT of zero if it arrives within the same clock
+tick; that is different from having no sample.
 Rates require the underlying server to supply timings or rates recognized by
 the existing usage parser. Token counts alone cannot establish either rate.
 No estimate from total HTTP duration is substituted.
