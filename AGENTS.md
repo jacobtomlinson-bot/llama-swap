@@ -2,10 +2,10 @@
 
 - Use the existing technologies (Go, typescript, YAML, etc) when making changes
 
-## Contribution Guidelines
+## Publishing Fork Changes
 
-- Follow CONTRIBUTING.md guidelines before submitted an issue or pull request (PR)
-- When asked to create a pull request or issue ask the user for a decision if a violation of the rules is discovered.
+- Before pushing, follow [CONTRIBUTING.md](CONTRIBUTING.md) for checks and the
+  direct-to-main fork workflow. Humans and authorized agents use the same rules.
 
 ## Testing Changes
 

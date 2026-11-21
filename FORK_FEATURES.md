@@ -71,8 +71,8 @@ check the workflow's status in Actions and
 there if needed.
 
 A read-only preparation job fetches upstream `main` and rebases the fork's
-linear commits. Use squash merges or rebase merges for fork PRs so `main`
-stays linear above upstream. Sync stops if any merge commit would need to be
+linear commits. Follow [CONTRIBUTING.md](CONTRIBUTING.md) for checked, direct
+pushes to the fork's `main`. Sync stops if any merge commit would need to be
 replayed: recreating it can lose changes made only in the original merge.
 Merges already reachable from upstream are not replayed or rejected.
 Fork patches are tried against the current upstream tree even if an earlier
@@ -82,7 +82,8 @@ so an edit still present upstream is not duplicated.
 If the fork is eligible and already current, the job does nothing.
 Otherwise, before any candidate code runs, it uploads an immutable Git
 bundle and records its artifact ID and candidate SHA. A separate read-only
-job verifies the bundle, checks out that SHA, and runs the Go race suite, utility and UI tests, and native build.
+job verifies the bundle, checks out that SHA, and runs the Go race suite,
+utility and UI tests, and native build.
 Only after tests pass, a fresh job with `contents: write` verifies the same
 preparation outputs and bundle without executing the rebased code. It checks
 upstream did not move, then updates only the fork's `main` with a lease on the
@@ -93,13 +94,14 @@ push wins, the lease fails; run again from fresh refs rather than overriding it.
 Git automatically combines nonoverlapping edits and identical changes when
 its normal three-way rebase can do so cleanly; those candidates still need to
 pass tests. If Git reports any unresolved conflict, automation stops and a
-maintainer must resolve it on a review branch. There is no automatic
+maintainer must resolve it on a separate working branch. There is no automatic
 resolution for overlapping changes Git cannot combine, and the job does not
 pick one side, apply `rerere`, or publish a partially resolved branch. A
 conflict, test failure, workflow-file change, or fork lease failure leaves the
-previous fork `main` untouched by the job. A successful token-authenticated update does **not**
-fire push workflows; a separate job with `actions: write` dispatches **Fork
-latest image** on the current fork `main`. If dispatch fails after the update,
+previous fork `main` untouched by the job. A successful token-authenticated
+update does **not** fire push workflows; a separate job with `actions: write`
+dispatches **Fork latest image** on the current fork `main`. If dispatch fails
+after the update,
 rerun that failed job or dispatch the image workflow manually on `main`.
 Image and sync artifacts expire after one day. If an artifact needed by a
 failed-job rerun has expired, dispatch a fresh workflow on the current
@@ -123,13 +125,13 @@ that remove that base.
    `mostlygeek/llama-swap`. Run `git fetch --no-tags origin main` and
    `git fetch --no-tags upstream main`. Record `old=$(git rev-parse origin/main)`
    and `base=$(git rev-parse upstream/main)`.
-2. For linear fork history, create a review branch at `$old` and run
+2. For linear fork history, create a working branch at `$old` and run
    `git rebase --no-fork-point --no-rebase-merges --reapply-cherry-picks --empty=drop "$base"`.
    Do **not** rebase a history containing a fork-only merge directly. Keep
    `$old` and inspect `git rev-list --merges "$base..$old"`, including any edits
    made only in the recorded merge trees. With a single known common ancestor
    from `git merge-base --all "$old" "$base"`, one recovery is to start a
-   fresh review branch at that ancestor and run `git merge --squash "$old"`.
+   fresh working branch at that ancestor and run `git merge --squash "$old"`.
    Before committing, require `git diff --cached --exit-code "$old" --` to
    prove that the staged tree preserves the entire old tip, including
    merge-only edits. Commit the reviewed snapshot with your signing identity
@@ -141,16 +143,19 @@ that remove that base.
    For workflow changes that Git merged cleanly, inspect
    `git diff "$old" HEAD -- .github/workflows/` and verify the repository and
    branch guards, pinned actions and job token permissions still hold.
-3. Run the checks below and review `git diff "$base" HEAD`. Share the
-   candidate on a fork review branch for maintainer approval. After approval
-   and a fresh upstream check, an authorized maintainer can update fork
-   `main` with `git push --force-with-lease="refs/heads/main:$old" origin
-   HEAD:refs/heads/main`. If either ref moved, rebase and test again.
-   Never push the candidate to upstream.
+3. Run the checks below and review `git diff "$base" HEAD`. Get maintainer
+   approval for the history rewrite and confirm upstream still points to
+   `$base`. Push the checked candidate directly to fork `main`:
+
+   ```sh
+   git push --force-with-lease="refs/heads/main:$old" origin HEAD:refs/heads/main
+   ```
+
+   If either ref moved, rebase and test again. Never push to upstream.
 4. Optional follow-up: schedule a read-only check of failed **Fork nightly
    upstream sync** runs. On an unresolved conflict, notify the maintainer
-   with the run and conflicting files, and suggest a review branch for the
-   fix. Do not have the watcher write to `main`, alter workflow permissions
+   with the run and conflicting files, and suggest resolving on a working
+   branch. Do not have the watcher write to `main`, alter workflow permissions
    or decide semantic conflicts. This repository does not install that watcher.
 
 ### Verify after every rebase
@@ -164,11 +169,6 @@ that remove that base.
   `HEAD` for `origin/main`. Run
   `make simple-responder && make test-all && make test-cmd && make test-ui &&
   CGO_ENABLED=0 make native`.
-- Check Actions for the image run corresponding to that fork `main` SHA.
-  Run `docker pull ghcr.io/jacobtomlinson-bot/llama-swap:latest` and
-  `docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
-  ghcr.io/jacobtomlinson-bot/llama-swap:latest`; expect the current fork
-  `main` SHA. Verify it matches the published run's recorded digest.
 - Run the real proxy smoke test using the fake model in
   [synthetic-data.md](docs/development/synthetic-data.md). Add
   `aliases: ["fast-alias"]` under `fake-fast`, then send the documented
@@ -176,3 +176,36 @@ that remove that base.
   Scrape `curl -fsS localhost:8080/metrics | grep '^llamaswap_model_'`.
   Expect positive TTFT, a positive prefill rate, and a generation rate near
   200 for `model="fake-fast"`, with no `model="fast-alias"` sample.
+
+### Verify on GitHub Actions
+
+1. After an authorized push, record the fork `main` SHA:
+   `git ls-remote https://github.com/jacobtomlinson-bot/llama-swap.git refs/heads/main`.
+   Find that SHA's run of **Fork latest image** in the fork's Actions tab.
+   Require successful build and publish jobs, then run:
+
+   ```sh
+   image=ghcr.io/jacobtomlinson-bot/llama-swap:latest
+   docker pull "$image"
+   docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image"
+   docker buildx imagetools inspect "$image"
+   ```
+
+   The label must match the run's SHA, and the manifest digest must match
+   the publish job summary. If a later push superseded the run, verify the
+   new tip at `:latest`, or check the older revision's `sha-<commit>` tag
+   if that run uploaded one.
+2. Dispatch the nightly workflow on the fork's `main` with
+   `gh workflow run fork-sync.yml --repo jacobtomlinson-bot/llama-swap --ref main`.
+   In Actions, inspect that dispatch's **Fork nightly upstream sync** run.
+   If upstream has not advanced, expect “Upstream main is already included,”
+   no candidate upload, and skipped test, update, and image dispatch jobs.
+   Check fork `main` stayed at the starting SHA. This proves the hosted
+   no-op path, not publication or a rebase. On a clean upstream advance,
+   verify the tested candidate SHA matches fork `main` and the resulting
+   image run publishes that revision (repeat step 1).
+3. For a genuine conflict, expect the preparation job to log the conflict
+   and fail; no test, update, or image dispatch job should run. Confirm the
+   sync did not change fork `main` and follow the recovery above. If no
+   conflict occurs on GitHub, use `scripts/test-fork-sync.py` to verify this
+   path locally; don't create a conflict on live `main` just to test it.
