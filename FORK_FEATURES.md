@@ -102,27 +102,33 @@ push wins, the lease fails; run again from fresh refs rather than overriding it.
 
 Git automatically combines nonoverlapping edits and identical changes when
 its normal three-way rebase can do so cleanly; those candidates still need to
-pass tests. If Git reports any unresolved conflict, automation stops and a
-maintainer must resolve it on a separate working branch. There is no automatic
-resolution for overlapping changes Git cannot combine, and the job does not
-pick one side, apply `rerere`, or publish a partially resolved branch. A
-conflict, test failure, workflow-file change, or fork lease failure leaves the
-previous fork `main` untouched by the job. A successful token-authenticated
-update does **not** fire push workflows; a separate job with `actions: write`
-dispatches **Fork latest image** on the current fork `main`. If dispatch fails
-after the update,
-rerun that failed job or dispatch the image workflow manually on `main`.
+pass tests. There is one automatic conflict resolution: keep the fork's
+deletion of `.github/workflows/go-ci-windows.yml` when it is the only
+unmerged path and the index proves a same-path upstream edit against that
+deletion. The resolver requires a single common base, matching regular-file
+blobs, no other workflow edit staged for replay, and no additional path
+adds, removals, or type changes in the compared trees that could make a
+rename ambiguous. It tries only one continuation per run.
+
+Other conflicts, any failed eligibility check, and a conflict during the
+continuation require maintainer resolution on a separate working branch.
+The job does not pick a side for other paths, apply `rerere`, or publish a
+partially resolved branch. An unresolved conflict, test failure, workflow-tree
+change, or fork lease failure leaves fork `main` untouched by the job. A
+successful token-authenticated update does **not** fire push workflows; a
+separate job with `actions: write` dispatches **Fork latest image** on the
+current fork `main`. If dispatch fails after the update, rerun that failed
+job or dispatch the image workflow manually on `main`.
 Image and sync artifacts expire after one day. If an artifact needed by a
 failed-job rerun has expired, dispatch a fresh workflow on the current
 `main`.
 
 The sync uses the repository `GITHUB_TOKEN` only. It intentionally stops
-when the rebased workflow tree differs from the current fork's: an unchanged
-upstream Windows workflow stays deleted in a clean rebase; if upstream edits
-it, the delete/modify conflict requires manual resolution. Workflow-changing
-pushes may require
-workflow-write authorization unavailable to the default token, and incoming
-workflow changes warrant manual review anyway. GitHub branch rules must
+when the rebased workflow tree differs from the starting fork's. Both the
+preparation and push jobs require exact equality; the Windows deletion
+exception does not allow any workflow-tree change. Workflow-changing pushes
+may require workflow-write authorization unavailable to the default token,
+and incoming workflow changes warrant manual review anyway. GitHub branch rules must
 permit the bot's leased update; rewritten fork commits lose their previous
 signatures and this runner cannot sign on a maintainer's behalf. Don't weaken
 rules to get a run through: fall back to a manually reviewed, signed rebase.
@@ -174,8 +180,8 @@ that remove that base.
 
 - When changing the sync workflow, run `python3 scripts/test-fork-sync.py`
   with PyYAML installed. It exercises the workflow's Git steps against local
-  disposable repos, including merge-only changes, reverted upstream patches,
-  and concurrent updates.
+  disposable repos, including the Windows CI deletion exception, merge-only
+  changes, reverted upstream patches, and concurrent updates.
 - Confirm `git merge-base --is-ancestor <upstream-sha-from-sync> origin/main`
   and inspect the remaining fork diff. For a local candidate substitute
   `HEAD` for `origin/main`. Run
@@ -216,8 +222,8 @@ that remove that base.
    no-op path, not publication or a rebase. On a clean upstream advance,
    verify the tested candidate SHA matches fork `main` and the resulting
    image run publishes that revision (repeat step 1).
-3. For a genuine conflict, expect the preparation job to log the conflict
-   and fail; no test, update, or image dispatch job should run. Confirm the
+3. For a conflict outside the Windows CI exception, expect preparation to log
+   the conflict and fail; no test, update, or image dispatch job should run. Confirm the
    sync did not change fork `main` and follow the recovery above. If no
    conflict occurs on GitHub, use `scripts/test-fork-sync.py` to verify this
    path locally; don't create a conflict on live `main` just to test it.

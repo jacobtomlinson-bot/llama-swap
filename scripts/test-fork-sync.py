@@ -46,7 +46,7 @@ def shell(job, step, cwd, env, reject=None):
     script = next(
         s["run"] for s in JOBS[job]["steps"] if step in (s.get("id"), s.get("name"))
     )
-    run("bash", "-eo", "pipefail", "-c", script, cwd=cwd, env=env, reject=reject)
+    return run("bash", "-eo", "pipefail", "-c", script, cwd=cwd, env=env, reject=reject)
 
 
 def edit(cwd, filename, text):
@@ -86,14 +86,25 @@ def scenario(case, directory):
     git(prep, "fetch", "--no-tags", ROOT, FLOOR)
     git(prep, "checkout", "--detach", FLOOR)
     common = make_merge(prep) if case == "upstream-merge" else FLOOR
-    removes_windows_ci = case in ("windows-ci-deleted", "windows-ci-upstream-edit")
+    windows_conflict = case.startswith("windows-ci-") and case != "windows-ci-deleted"
+    if windows_conflict:
+        common = commit(prep, "fixture-fork.txt", "Shared preimage")
+    if case == "windows-ci-later-conflict":
+        common = commit(prep, "fixture-later.txt", "Shared later preimage")
+    removes_windows_ci = case.startswith("windows-ci-") and case != "windows-ci-opposite-direction"
     if removes_windows_ci:
         git(prep, "rm", WINDOWS_CI)
+    if case == "windows-ci-opposite-direction":
+        edit(prep, WINDOWS_CI, "Fork modifies rather than deletes")
+    if case == "windows-ci-staged-workflow":
+        edit(prep, ".github/workflows/go-ci.yml", "Another staged workflow edit")
     if case == "fork-only-merge":
         old = make_merge(prep)
         assert git(prep, "rev-list", "HEAD", "--", "fixture-merge-only.txt") == old
     else:
         old = commit(prep, "fixture-fork.txt", "Fork edit")
+    if case == "windows-ci-later-conflict":
+        old = commit(prep, "fixture-later.txt", "Later fork edit")
     git(prep, "push", fork, "HEAD:refs/heads/main")
 
     git(prep, "checkout", "--detach", common)
@@ -102,7 +113,6 @@ def scenario(case, directory):
     upstream_path = {
         "conflict": "fixture-fork.txt",
         "workflow-change": ".github/workflows/fixture.yml",
-        "windows-ci-upstream-edit": WINDOWS_CI,
     }.get(case, "fixture-upstream.txt")
     patch_equivalent = case in ("upstream-copy-present", "upstream-copy-reverted")
     if case == "already-current":
@@ -117,6 +127,25 @@ def scenario(case, directory):
         base = git(prep, "rev-parse", "HEAD")
         assert base != old
         assert git(prep, "cherry", base, old) == f"- {old}"
+    elif windows_conflict:
+        if case == "windows-ci-upstream-rename":
+            git(prep, "mv", WINDOWS_CI, ".github/workflows/renamed-windows.yml")
+            git(prep, "commit", "-m", "Rename Windows CI upstream")
+            base = git(prep, "rev-parse", "HEAD")
+        elif case == "windows-ci-opposite-direction":
+            git(prep, "rm", WINDOWS_CI)
+            git(prep, "commit", "-m", "Retire Windows CI upstream")
+            base = git(prep, "rev-parse", "HEAD")
+        else:
+            if case == "windows-ci-mixed-conflict":
+                edit(prep, "fixture-fork.txt", "Conflicting upstream edit")
+            if case == "windows-ci-later-conflict":
+                edit(prep, "fixture-later.txt", "Conflicting later upstream edit")
+            if case == "windows-ci-upstream-workflow":
+                edit(prep, ".github/workflows/go-ci.yml", "Independent upstream workflow edit")
+            if case == "windows-ci-path-topology":
+                edit(prep, "unexpected-new-path.txt", "Ambiguous upstream path topology")
+            base = commit(prep, WINDOWS_CI, "Upstream edits the retired workflow")
     else:
         base = commit(prep, upstream_path, "Upstream edit")
     git(prep, "push", upstream, "HEAD:refs/heads/main")
@@ -134,9 +163,20 @@ def scenario(case, directory):
         "fork-only-merge": f"Fork-only merge {old} requires maintainer review",
         "conflict": "Unresolved rebase conflict",
         "workflow-change": "The rebase changes workflow files",
-        "windows-ci-upstream-edit": "Unresolved rebase conflict",
+        "windows-ci-mixed-conflict": "Unresolved rebase conflict",
+        "windows-ci-upstream-rename": "Unresolved rebase conflict",
+        "windows-ci-opposite-direction": "Unresolved rebase conflict",
+        "windows-ci-staged-workflow": "Unresolved rebase conflict",
+        "windows-ci-later-conflict": "Unresolved rebase conflict",
+        "windows-ci-path-topology": "Unresolved rebase conflict",
+        "windows-ci-upstream-workflow": "The rebase changes workflow files",
     }
-    shell("prepare", "rebase", prep, env, reject=rejects.get(case))
+    log = shell("prepare", "rebase", prep, env, reject=rejects.get(case))
+    resolution_logged = log.count("Kept the fork's deletion of the retired Windows CI workflow.")
+    assert resolution_logged == int(case in (
+        "windows-ci-upstream-edit", "windows-ci-later-conflict",
+        "windows-ci-upstream-workflow", "windows-ci-writer-guard",
+    )), log
     if case in rejects or case == "already-current":
         assert git(fork, "rev-parse", "main") == old
         assert not output.exists(), "unexpected candidate output"
@@ -182,6 +222,15 @@ def scenario(case, directory):
         expected = commit(prep, "fixture-human.txt", "New fork main work")
         git(prep, "push", fork, "HEAD:refs/heads/main")
         reject = "stale info"
+    if case == "windows-ci-writer-guard":
+        # Supply a valid bundle and matching SHA with an altered workflow tree.
+        # The independent writer check must still reject it before pushing.
+        changed = commit(prep, ".github/workflows/go-ci.yml", "Unexpected workflow content")
+        git(prep, "branch", "-f", "fork-sync-candidate", changed)
+        git(prep, "bundle", "create", directory / "fork-sync/candidate.bundle",
+            "refs/heads/fork-sync-candidate", f"^{old}")
+        env["CANDIDATE"] = changed
+        expected, reject = old, ""
     if case == "upstream-race":
         git(prep, "checkout", "--detach", base)
         commit(prep, "fixture-new-upstream.txt", "New upstream work")
@@ -209,6 +258,14 @@ if __name__ == "__main__":
         "workflow-change",
         "windows-ci-deleted",
         "windows-ci-upstream-edit",
+        "windows-ci-mixed-conflict",
+        "windows-ci-upstream-rename",
+        "windows-ci-opposite-direction",
+        "windows-ci-staged-workflow",
+        "windows-ci-later-conflict",
+        "windows-ci-path-topology",
+        "windows-ci-upstream-workflow",
+        "windows-ci-writer-guard",
         "fork-race",
         "upstream-race",
     ):

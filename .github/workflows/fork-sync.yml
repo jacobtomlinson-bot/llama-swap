@@ -55,21 +55,69 @@ jobs:
             echo "Upstream main is already included." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          resolve_retired_windows_ci() {
+            local retired=.github/workflows/go-ci-windows.yml
+            local picked parent preimage current fork_base entry stages topology workflows
+            picked=$(git rev-parse --verify REBASE_HEAD) || return 1
+            parent=$(git rev-parse --verify "$picked^") || return 1
+            preimage=$(git rev-parse --verify "$parent:$retired") || return 1
+            current=$(git rev-parse --verify "HEAD:$retired") || return 1
+            [[ "$preimage" != "$current" ]] || return 1
+
+            # Tie both stages to the actual upstream revision, not a prior
+            # fork commit replayed onto HEAD.
+            fork_base=$(git merge-base --all "$upstream" "$GITHUB_SHA") || return 1
+            [[ "$fork_base" =~ ^[0-9a-f]{40}$ ]] || return 1
+            git merge-base --is-ancestor "$upstream" HEAD || return 1
+            entry=$(git ls-tree "$fork_base" -- "$retired") || return 1
+            [[ "$entry" == "$(printf '100644 blob %s\t%s' "$preimage" "$retired")" ]] || return 1
+            entry=$(git ls-tree "$upstream" -- "$retired") || return 1
+            [[ "$entry" == "$(printf '100644 blob %s\t%s' "$current" "$retired")" ]] || return 1
+
+            # Exact regular-file stage 1 (fork parent) and stage 2 (rebase HEAD);
+            # no stage 3 (fork deletion), and no other unmerged path.
+            stages=$(git ls-files --unmerged) || return 1
+            [[ "$stages" == "$(printf '100644 %s 1\t%s\n100644 %s 2\t%s' \
+              "$preimage" "$retired" "$current" "$retired")" ]] || return 1
+
+            # Compare raw path topology, not similarity-based rename guesses.
+            # No possible rename source/destination on either side.
+            topology=$(git diff --no-renames --name-status --diff-filter=ADT "$parent" "$picked") || return 1
+            [[ "$topology" == "$(printf 'D\t%s' "$retired")" ]] || return 1
+            topology=$(git diff --no-renames --name-status --diff-filter=ADT "$parent" HEAD) || return 1
+            [[ -z "$topology" ]] || return 1
+            topology=$(git diff --no-renames --name-status --diff-filter=ADT "$fork_base" "$upstream") || return 1
+            [[ -z "$topology" ]] || return 1
+
+            # No other workflow edit in the replayed commit or staged index.
+            workflows=$(git diff --no-renames --name-status "$parent" "$picked" -- .github/workflows/) || return 1
+            [[ "$workflows" == "$(printf 'D\t%s' "$retired")" ]] || return 1
+            workflows=$(git diff --cached --no-renames --name-status -- .github/workflows/) || return 1
+            [[ "$workflows" == "$(printf 'U\t%s' "$retired")" ]] || return 1
+            git rm -- "$retired" || return 1
+            workflows=$(git diff --cached --no-renames --name-status -- .github/workflows/) || return 1
+            [[ "$workflows" == "$(printf 'D\t%s' "$retired")" ]] || return 1
+            echo "Kept the fork's deletion of the retired Windows CI workflow."
+          }
+
           # A patch-equivalent upstream commit may have been reverted later.
           # Replay fork commits and drop only those that become empty on the new base.
-          if ! git -c user.name=github-actions\[bot\] \
-                   -c user.email=41898282+github-actions\[bot\]@users.noreply.github.com \
-                   -c core.hooksPath=/dev/null -c rerere.enabled=false \
-                   rebase --no-fork-point --no-rebase-merges \
+          rebase_git=(git -c 'user.name=github-actions[bot]'
+                          -c 'user.email=41898282+github-actions[bot]@users.noreply.github.com'
+                          -c core.hooksPath=/dev/null -c rerere.enabled=false)
+          if ! "${rebase_git[@]}" rebase --no-fork-point --no-rebase-merges \
                    --reapply-cherry-picks --empty=drop "$upstream"; then
-            if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
-              echo "::error::Unresolved rebase conflict: follow FORK_FEATURES.md. main was not updated."
-              git status --short
-            else
-              echo "::error::Rebase failed; inspect the git error above. main was not updated."
+            # At most one automatic resolution and one continuation per run.
+            if ! resolve_retired_windows_ci || ! GIT_EDITOR=true "${rebase_git[@]}" rebase --continue; then
+              if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
+                echo "::error::Unresolved rebase conflict: follow FORK_FEATURES.md. main was not updated."
+                git status --short
+              else
+                echo "::error::Rebase failed; inspect the git error above. main was not updated."
+              fi
+              git rebase --abort || true
+              exit 1
             fi
-            git rebase --abort || true
-            exit 1
           fi
           # GITHUB_TOKEN may be refused when introducing/modifying workflow
           # files. Require maintainer review regardless of server behavior.
