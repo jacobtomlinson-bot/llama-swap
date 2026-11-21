@@ -1,6 +1,6 @@
 # CPU server base and the same /app entrypoint/config contract as
 # docker/llama-swap.Containerfile, but install the fork's built binary.
-FROM ghcr.io/ggml-org/llama.cpp:server
+FROM ghcr.io/ggml-org/llama.cpp:server@sha256:ae28f5c2046de51dfd00c9116a36fe44b5e8703ef730d0aea69082781eecb1f7
 
 USER root
 RUN groupadd --system --gid 10001 app && \
