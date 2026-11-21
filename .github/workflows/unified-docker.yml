@@ -98,6 +98,7 @@ permissions:
 # of that architecture; a manifest job then joins them into the tag users pull.
 jobs:
   setup:
+    if: github.repository != 'jacobtomlinson-bot/llama-swap'
     runs-on: ubuntu-latest
     outputs:
       build_cuda: ${{ steps.plan.outputs.build_cuda }}

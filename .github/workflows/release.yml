@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   goreleaser:
+    if: github.repository != 'jacobtomlinson-bot/llama-swap'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -51,6 +51,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.repository != 'jacobtomlinson-bot/llama-swap'
     runs-on: ubuntu-latest
     steps:
       # Full history and tags: the ref input may name a tag, a branch or a

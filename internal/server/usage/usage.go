@@ -79,7 +79,7 @@ func extractorFor(u hint.Upstream) usageExtractor {
 func Extract(u hint.Upstream, path, contentType string, body []byte, start time.Time) (Usage, error) {
 	p := extractorFor(u).newParser(path, start)
 
-	if strings.Contains(contentType, "text/event-stream") {
+	if IsEventStream(contentType) {
 		forEachSSEData(body, func(data []byte) {
 			if gjson.ValidBytes(data) {
 				p.event(gjson.ParseBytes(data))
@@ -106,10 +106,15 @@ func Extract(u hint.Upstream, path, contentType string, body []byte, start time.
 	return usage, nil
 }
 
+// IsEventStream identifies an SSE response independently of optional parameters.
+func IsEventStream(contentType string) bool {
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	return strings.EqualFold(strings.TrimSpace(mediaType), "text/event-stream")
+}
+
 // forEachSSEData calls fn with the payload of every non-empty data: line in
 // an event stream, skipping the [DONE] terminator.
 func forEachSSEData(body []byte, fn func(data []byte)) {
-	prefix := []byte("data:")
 	for offset := 0; offset < len(body); {
 		nl := bytes.IndexByte(body[offset:], '\n')
 		var line []byte
@@ -121,16 +126,22 @@ func forEachSSEData(body []byte, fn func(data []byte)) {
 			offset += nl + 1
 		}
 
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 || !bytes.HasPrefix(line, prefix) {
-			continue
+		if data := sseData(line); len(data) != 0 {
+			fn(data)
 		}
-		data := bytes.TrimSpace(line[len(prefix):])
-		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
-			continue
-		}
-		fn(data)
 	}
+}
+
+func sseData(line []byte) []byte {
+	data, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte("data:"))
+	if !ok {
+		return nil
+	}
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("[DONE]")) {
+		return nil
+	}
+	return data
 }
 
 // apiUsage holds the token counts read from an API usage block. Each wire
