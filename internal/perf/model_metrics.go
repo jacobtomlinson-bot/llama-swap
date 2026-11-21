@@ -22,15 +22,15 @@ type sample struct {
 	valid bool
 }
 
-// Observe updates only the values present in a completed request. TTFT must
-// be positive (zero means no text observed); negative rates mean not reported.
+// Observe updates only the values present in a completed request. Negative
+// values mean not reported. Zero is a valid observation for all three gauges.
 func (m *ModelMetrics) Observe(model string, ttft, prefill, generation float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	values := m.models[model]
 	changed := false
 	for i, value := range [...]float64{ttft, prefill, generation} {
-		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || (i == 0 && value == 0) {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
 			continue
 		}
 		values[i] = sample{value, true}
