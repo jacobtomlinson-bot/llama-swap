@@ -99,7 +99,21 @@ def scenario(case, directory):
         "conflict": "fixture-fork.txt",
         "workflow-change": ".github/workflows/fixture.yml",
     }.get(case, "fixture-upstream.txt")
-    base = common if case == "already-current" else commit(prep, upstream_path, "Upstream edit")
+    patch_equivalent = case in ("upstream-copy-present", "upstream-copy-reverted")
+    if case == "already-current":
+        base = common
+    elif patch_equivalent:
+        # Same patch as the fork commit, but a different commit identity.
+        edit(prep, "fixture-fork.txt", "Fork edit")
+        git(prep, "commit", "-m", "Independent upstream copy of fork edit")
+        if case == "upstream-copy-reverted":
+            git(prep, "revert", "--no-edit", "HEAD")
+            assert not (prep / "fixture-fork.txt").exists()
+        base = git(prep, "rev-parse", "HEAD")
+        assert base != old
+        assert git(prep, "cherry", base, old) == f"- {old}"
+    else:
+        base = commit(prep, upstream_path, "Upstream edit")
     git(prep, "push", upstream, "HEAD:refs/heads/main")
     git(prep, "checkout", "--detach", old)
     output = directory / "output"
@@ -128,7 +142,12 @@ def scenario(case, directory):
     shell("prepare", "bundle", prep, env)
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
     candidate = outputs["candidate"]
-    assert outputs["upstream"] == git(prep, "rev-parse", f"{candidate}^") == base
+    assert outputs["upstream"] == base
+    if case == "upstream-copy-present":
+        # Replaying an already-present edit must not create a redundant commit.
+        assert candidate == base
+    else:
+        assert git(prep, "rev-parse", f"{candidate}^") == base, "fork patch was not replayed"
     assert git(prep, "show", f"{candidate}:fixture-fork.txt") == "Fork edit"
     if case in ("upstream-merge", "new-upstream-merge"):
         assert git(prep, "show", f"{candidate}:fixture-merge-only.txt") == "Present only in the merge tree"
@@ -163,6 +182,8 @@ def scenario(case, directory):
     shell("update-main", "Verify candidate and compare-and-swap fork main", writer, env, reject)
     assert git(writer, "rev-parse", "HEAD") == old
     assert git(fork, "rev-parse", "main") == expected
+    if patch_equivalent:
+        assert git(fork, "show", "main:fixture-fork.txt") == "Fork edit"
 
 
 if __name__ == "__main__":
@@ -170,6 +191,8 @@ if __name__ == "__main__":
         "fork-only-merge",
         "upstream-merge",
         "new-upstream-merge",
+        "upstream-copy-reverted",
+        "upstream-copy-present",
         "clean",
         "already-current",
         "conflict",

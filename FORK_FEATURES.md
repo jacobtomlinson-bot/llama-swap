@@ -75,6 +75,10 @@ linear commits. Use squash merges or rebase merges for fork PRs so `main`
 stays linear above upstream. Sync stops if any merge commit would need to be
 replayed: recreating it can lose changes made only in the original merge.
 Merges already reachable from upstream are not replayed or rejected.
+Fork patches are tried against the current upstream tree even if an earlier
+upstream commit matched the patch: an upstream revert must not silently
+remove the fork's change. A patch that becomes empty on replay is dropped,
+so an edit still present upstream is not duplicated.
 If the fork is eligible and already current, the job does nothing.
 Otherwise, before any candidate code runs, it uploads an immutable Git
 bundle and records its artifact ID and candidate SHA. A separate read-only
@@ -120,10 +124,10 @@ that remove that base.
    `git fetch --no-tags upstream main`. Record `old=$(git rev-parse origin/main)`
    and `base=$(git rev-parse upstream/main)`.
 2. For linear fork history, create a review branch at `$old` and run
-   `git rebase --no-fork-point --no-rebase-merges "$base"`. If the job found
-   a fork-only merge, do **not** rebase that history directly. Keep `$old`
-   and inspect `git rev-list --merges "$base..$old"`, including any edits made
-   only in the recorded merge trees. With a single known common ancestor
+   `git rebase --no-fork-point --no-rebase-merges --reapply-cherry-picks --empty=drop "$base"`.
+   Do **not** rebase a history containing a fork-only merge directly. Keep
+   `$old` and inspect `git rev-list --merges "$base..$old"`, including any edits
+   made only in the recorded merge trees. With a single known common ancestor
    from `git merge-base --all "$old" "$base"`, one recovery is to start a
    fresh review branch at that ancestor and run `git merge --squash "$old"`.
    Before committing, require `git diff --cached --exit-code "$old" --` to
@@ -153,7 +157,8 @@ that remove that base.
 
 - When changing the sync workflow, run `python3 scripts/test-fork-sync.py`
   with PyYAML installed. It exercises the workflow's Git steps against local
-  disposable repos, including merge-only changes and concurrent updates.
+  disposable repos, including merge-only changes, reverted upstream patches,
+  and concurrent updates.
 - Confirm `git merge-base --is-ancestor <upstream-sha-from-sync> origin/main`
   and inspect the remaining fork diff. For a local candidate substitute
   `HEAD` for `origin/main`. Run
