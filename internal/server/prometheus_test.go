@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type cancelRequestKey struct{}
 
 func TestServer_PrometheusCanonicalModel(t *testing.T) {
 	cfg, err := config.LoadConfigFromReader(strings.NewReader(`
@@ -34,20 +37,34 @@ models:
 			w.(http.Flusher).Flush()
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":")
 			fmt.Fprint(w, "\"first text\"}}]}\r\n\r\n")
-			fmt.Fprint(w, "data: {\"timings\":{\"prompt_per_second\":200,\"predicted_per_second\":40}}\n\ndata: [DONE]\n\n")
+			fmt.Fprint(w, "data: {\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":2}}\n\n")
+			for range 2 {
+				fmt.Fprint(w, "data: {\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":6}},\"timings\":{\"prompt_per_second\":200,\"predicted_per_second\":40}}\n\n")
+			}
+			fmt.Fprint(w, "data: [DONE]\n\n")
 		case "no-text-stream":
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
 			fmt.Fprint(w, "data: {\"timings\":{\"prompt_per_second\":150,\"predicted_per_second\":30}}\n\ndata: [DONE]\n\n")
+		case "cached-only":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"usage\":{\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\ndata: [DONE]\n\n")
+		case "zero-negative":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":-9,"completion_tokens":0,"prompt_tokens_details":{"cached_tokens":-1}}}`)
+		case "canceled":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":900,"completion_tokens":800}}`)
+			r.Context().Value(cancelRequestKey{}).(context.CancelFunc)()
 		case "failed":
 			w.WriteHeader(http.StatusBadGateway)
-			fmt.Fprint(w, `{"timings":{"prompt_per_second":999,"predicted_per_second":999}}`)
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":900,"completion_tokens":800},"timings":{"prompt_per_second":999,"predicted_per_second":999}}`)
 		case "no-rates":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"usage":{"prompt_tokens":12,"completion_tokens":7}}`)
 		default:
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"timings":{"prompt_per_second":150,"predicted_per_second":30}}`)
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":15,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}},"timings":{"prompt_per_second":150,"predicted_per_second":30}}`)
 		}
 	}
 	s := newTestServerWithConfig(cfg, local, newStubRouter(nil, ""))
@@ -61,6 +78,11 @@ models:
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(fmt.Sprintf(`{"model":%q}`, model)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Test-Mode", mode)
+		if mode == "canceled" {
+			ctx, cancel := context.WithCancel(req.Context())
+			defer cancel()
+			req = req.WithContext(context.WithValue(ctx, cancelRequestKey{}, cancel))
+		}
 		s.ServeHTTP(w, req)
 		require.Equal(t, status, w.Code, "%s", w.Body.String())
 	}
@@ -85,6 +107,9 @@ models:
 	post("/v1/chat/completions", "nick", "stream", http.StatusOK)
 	post("/v1/chat/completions", "nick", "no-rates", http.StatusOK)
 	post("/v1/chat/completions", "canonical", "failed", http.StatusBadGateway)
+	post("/v1/chat/completions", "canonical", "canceled", http.StatusOK)
+	post("/v1/chat/completions", "canonical", "zero-negative", http.StatusOK)
+	post("/v1/chat/completions", "other", "cached-only", http.StatusOK)
 	post("/v1/chat/completions", "other", "no-text-stream", http.StatusOK)
 	post("/v1/embeddings", "canonical", "", http.StatusOK)
 	// Even a successful reply from a permissive router cannot put an
@@ -92,6 +117,14 @@ models:
 	post("/v1/chat/completions", "not-configured", "", http.StatusOK)
 
 	body = scrape()
+	for name, total := range map[string]int{"input": 82, "output": 23, "cached": 20} {
+		metric := "llamaswap_model_" + name + "_tokens_total"
+		assert.Contains(t, body, "# TYPE "+metric+" counter\n")
+		assert.Contains(t, body, fmt.Sprintf("%s{model=\"canonical\"} %d\n", metric, total))
+	}
+	assert.Contains(t, body, "llamaswap_model_cached_tokens_total{model=\"other\"} 3\n")
+	assert.NotContains(t, body, "llamaswap_model_input_tokens_total{model=\"other\"}")
+	assert.NotContains(t, body, "llamaswap_model_output_tokens_total{model=\"other\"}")
 	assert.Contains(t, body, "# TYPE llamaswap_model_time_to_first_token_seconds gauge")
 	assert.Contains(t, body, "llamaswap_model_time_to_first_token_seconds{model=\"canonical\"} ")
 	assert.Contains(t, body, "llamaswap_model_prefill_tokens_per_second{model=\"canonical\"} 200\n")

@@ -266,7 +266,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	initialSrv, err := server.New(cfg, logs, perfMon, initialStore, buildInfo, hardwareSnapshot, referenceDocs, sourceCode, pauseState)
+	initialSrv, err := server.New(cfg, logs, perfMon, initialStore, buildInfo, hardwareSnapshot, referenceDocs, sourceCode, pauseState, nil)
 	if err != nil {
 		slog.Error("failed to create server", "error", err)
 		initialStore.Close()
@@ -359,6 +359,7 @@ func main() {
 
 		newStorePaths := configStorePaths(newCfg)
 		activeMu.RLock()
+		currentSrv := activeSrv
 		currentStore := activeStore
 		currentStorePaths := activeStorePaths
 		currentTailcat := activeTailcat
@@ -374,7 +375,7 @@ func main() {
 			}
 		}
 
-		newSrv, err := server.New(newCfg, logs, perfMon, newStore, buildInfo, hardwareSnapshot, referenceDocs, sourceCode, pauseState)
+		newSrv, err := server.New(newCfg, logs, perfMon, newStore, buildInfo, hardwareSnapshot, referenceDocs, sourceCode, pauseState, currentSrv)
 		if err != nil {
 			proxyLog.Warnf("failed to build new server during reload: %v", err)
 			if storeChanged {

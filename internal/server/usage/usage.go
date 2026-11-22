@@ -7,6 +7,8 @@ package usage
 import (
 	"bytes"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,11 +153,10 @@ type apiUsage struct {
 	input, output     int
 	cached, reasoning int // -1 when not reported
 	found             bool
-	// inputExcludesCache is set by formats (Anthropic) whose input count
-	// leaves out cache reads and writes; cacheWrite is the cache write
-	// count. toUsage adds both back so input is always the whole prompt.
-	inputExcludesCache bool
-	cacheWrite         int
+	// Anthropic reports uncached input and the two cache components
+	// separately. Only assemble a prompt total if it reported input.
+	anthropicInputReported bool
+	cacheWrite             int
 }
 
 func newAPIUsage() apiUsage { return apiUsage{cached: -1, reasoning: -1} }
@@ -179,8 +180,8 @@ func apiReaderFor(path string) apiReader {
 // (rates, draft counts) unknown and the duration measured from start.
 func (a apiUsage) toUsage(start time.Time) Usage {
 	input := a.input
-	if a.inputExcludesCache {
-		input += max(a.cached, 0) + a.cacheWrite
+	if a.anthropicInputReported {
+		input = addCounts(input, max(a.cached, 0), a.cacheWrite)
 	}
 	return Usage{
 		Found: a.found,
@@ -198,26 +199,46 @@ func (a apiUsage) toUsage(start time.Time) Usage {
 	}
 }
 
-// setCount stores v in dst when it is a non-zero number and reports whether
-// the field was present at all.
-func setCount(dst *int, v gjson.Result) bool {
-	if !v.Exists() {
-		return false
+// reportedCount accepts only representable, nonnegative integer token counts.
+func reportedCount(v gjson.Result) (int, bool) {
+	if v.Type != gjson.Number {
+		return 0, false
 	}
-	if n := int(v.Int()); n > 0 {
-		*dst = n
-	}
-	return true
+	n, err := strconv.Atoi(v.Raw)
+	return n, err == nil && n >= 0
 }
 
-// setReported stores v in dst when it is a number, zero included. Used for
-// counts where 0 is a real answer (cached, reasoning).
-func setReported(dst *int, v gjson.Result) bool {
-	if v.Type != gjson.Number {
-		return false
+// addCounts combines nonnegative reported components. An unrepresentable sum
+// is unknown, not a wrapped or estimated token count.
+func addCounts(counts ...int) int {
+	var total int
+	for _, n := range counts {
+		if n > math.MaxInt-total {
+			return -1
+		}
+		total += n
 	}
-	*dst = int(v.Int())
-	return true
+	return total
+}
+
+// setCount retains earlier positive values when a later stream frame carries
+// a zero placeholder. It reports whether v is a valid token count.
+func setCount(dst *int, v gjson.Result) bool {
+	n, ok := reportedCount(v)
+	if ok && n > 0 {
+		*dst = n
+	}
+	return ok
+}
+
+// setReported stores an explicit count, including zero. Invalid or unknown
+// fields do not erase an earlier observation.
+func setReported(dst *int, v gjson.Result) bool {
+	n, ok := reportedCount(v)
+	if ok {
+		*dst = n
+	}
+	return ok
 }
 
 // apiExtractor reads only the API usage block. It serves hosted APIs

@@ -258,8 +258,9 @@ type BuildInfo struct {
 // leaves the code__* tools out.
 //
 // pause is shared across reloads too, so a reload keeps inference paused; nil
-// starts a fresh, unpaused state.
-func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.Store, build BuildInfo, hardware *hw.HardwareSnapshot, refs *docagent.Docs, code *sourcecode.Provider, pause *PauseState) (*Server, error) {
+// starts a fresh, unpaused state. When reloading, previous shares token
+// totals for canonical model IDs that remain configured.
+func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.Store, build BuildInfo, hardware *hw.HardwareSnapshot, refs *docagent.Docs, code *sourcecode.Provider, pause *PauseState, previous *Server) (*Server, error) {
 	var local router.LocalRouter
 	var err error
 
@@ -313,6 +314,7 @@ func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.
 		shutdownCtx:   shutdownCtx,
 		shutdownFn:    shutdownFn,
 	}
+	s.metrics.initTokenCounters(cfg, previous)
 	s.capcompat = capcompat.New(st.Cache(), logs.ProxyLogs)
 	s.capcompatCancel = event.On(s.onUpstreamDetected)
 

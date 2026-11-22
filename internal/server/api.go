@@ -432,6 +432,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.perf.MetricsHandler().ServeHTTP(w, r)
 	if s.metrics != nil {
 		s.metrics.prometheus.WritePrometheus(w)
+		s.metrics.tokenCounters.WritePrometheus(w)
 	}
 }
 

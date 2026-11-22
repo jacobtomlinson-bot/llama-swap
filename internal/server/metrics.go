@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/event"
 	"github.com/mostlygeek/llama-swap/internal/hint"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
@@ -54,6 +55,7 @@ type metricsMonitor struct {
 	enableCaptures  bool
 	maxCaptureBytes int64
 	prometheus      perf.ModelMetrics
+	tokenCounters   *perf.ModelTokenCounters
 
 	// pruneCh wakes the prune goroutine. It holds one pending request, so
 	// many captures written while a prune runs cause one more prune, not
@@ -87,6 +89,25 @@ func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB i
 		mm.requestCapturePrune()
 	}
 	return mm
+}
+
+// initTokenCounters runs before the new server accepts requests. Shared
+// entries keep counting completions still in flight on the previous server.
+func (mp *metricsMonitor) initTokenCounters(cfg config.Config, previous *Server) {
+	names := make([]string, 0, len(cfg.Models))
+	for name := range cfg.Models {
+		names = append(names, name)
+	}
+	for peerID, peer := range cfg.Peers {
+		for _, modelID := range peer.Models {
+			names = append(names, config.PeerModelFQN(peerID, modelID))
+		}
+	}
+	var prior *perf.ModelTokenCounters
+	if previous != nil && previous.metrics != nil {
+		prior = previous.metrics.tokenCounters
+	}
+	mp.tokenCounters = perf.NewModelTokenCounters(names, prior)
 }
 
 // startCapturePruner starts the goroutine that prunes captures. Close stops
@@ -365,6 +386,7 @@ func (mp *metricsMonitor) record(modelID string, task hint.Task, r *http.Request
 		prefill, generation := -1.0, -1.0
 		if err == nil && u.Found {
 			prefill, generation = u.Tokens.PromptPerSecond, u.Tokens.TokensPerSecond
+			mp.tokenCounters.Observe(recorder.prometheusModel, u.Tokens.InputTokens, u.Tokens.OutputTokens, u.Tokens.CachedTokens)
 		}
 		mp.prometheus.Observe(recorder.prometheusModel, recorder.ttftSeconds(), prefill, generation)
 	}

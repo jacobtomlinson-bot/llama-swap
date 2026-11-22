@@ -52,9 +52,7 @@ func applyTensorFold(u *Usage, tensorfold gjson.Result) {
 		return
 	}
 	u.Found = true
-	if v := tensorfold.Get("cached"); v.Type == gjson.Number && v.Int() >= 0 {
-		u.Tokens.CachedTokens = int(v.Int())
-	}
+	setReported(&u.Tokens.CachedTokens, tensorfold.Get("cached"))
 	prefill := tensorfold.Get("prefill_s")
 	if prefill.Type != gjson.Number {
 		prefill = tensorfold.Get("prefill_seconds")
