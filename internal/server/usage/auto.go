@@ -25,9 +25,9 @@ type autoParser struct {
 	read       apiReader
 	api        apiUsage
 	block      gjson.Result // last usage block
-	timings    gjson.Result
+	timings    usageBlock
 	metrics    gjson.Result
-	tensorfold gjson.Result
+	tensorfold usageBlock
 }
 
 func (p *autoParser) event(ev gjson.Result) {
@@ -36,15 +36,11 @@ func (p *autoParser) event(ev gjson.Result) {
 	if b := ev.Get("usage"); b.IsObject() {
 		p.block = b
 	}
-	if t := ev.Get("timings"); t.IsObject() {
-		p.timings = t
-	}
+	p.timings.update(ev.Get("timings"), "cache_n")
 	if m := ev.Get("metrics"); m.IsObject() {
 		p.metrics = m
 	}
-	if tf := ev.Get("tensorfold"); tf.IsObject() {
-		p.tensorfold = tf
-	}
+	p.tensorfold.update(ev.Get("tensorfold"), "cached")
 }
 
 func (p *autoParser) usage() Usage {
@@ -53,9 +49,9 @@ func (p *autoParser) usage() Usage {
 	applyTabbyAPIRates(&u, p.block) // TabbyAPI's fields win when both appear
 	applyTensorFold(&u, p.tensorfold)
 	applyTimings(&u, p.timings)
-	applyKyojinDrafts(&u, p.timings)
-	applyRadianceTotal(&u, p.timings)
-	applyHipfireTimings(&u, p.timings)
+	applyKyojinDrafts(&u, p.timings.last)
+	applyRadianceTotal(&u, p.timings.last)
+	applyHipfireTimings(&u, p.timings.last)
 	applyVLLMMetrics(&u, p.metrics)
 	return u
 }

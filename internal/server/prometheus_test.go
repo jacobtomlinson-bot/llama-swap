@@ -20,6 +20,7 @@ type cancelRequestKey struct{}
 
 func TestServer_PrometheusCanonicalModel(t *testing.T) {
 	cfg, err := config.LoadConfigFromReader(strings.NewReader(`
+apiKeys: [test-key]
 models:
   canonical:
     cmd: unused -port ${PORT}
@@ -49,6 +50,18 @@ models:
 		case "cached-only":
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, "data: {\"usage\":{\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\ndata: [DONE]\n\n")
+		case "mixed-scope":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"timings":{"prompt_n":2},"usage":{"prompt_tokens_details":{"cached_tokens":8}}}`)
+		case "cache-exceeds-input":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":2,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":9}}}`)
+		case "zero-input":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":0,"prompt_tokens_details":{"cached_tokens":9}},"timings":{"prompt_n":3}}`)
+		case "processed-only":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"timings":{"prompt_n":4,"predicted_n":2}}`)
 		case "zero-negative":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"usage":{"prompt_tokens":-9,"completion_tokens":0,"prompt_tokens_details":{"cached_tokens":-1}}}`)
@@ -78,6 +91,7 @@ models:
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(fmt.Sprintf(`{"model":%q}`, model)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Test-Mode", mode)
+		req.Header.Set("Authorization", "Bearer test-key")
 		if mode == "canceled" {
 			ctx, cancel := context.WithCancel(req.Context())
 			defer cancel()
@@ -89,12 +103,18 @@ models:
 	scrape := func() string {
 		t.Helper()
 		w := httptest.NewRecorder()
-		s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		s.ServeHTTP(w, req)
 		require.Equal(t, http.StatusOK, w.Code)
 		require.Contains(t, w.Header().Get("Content-Type"), "version=0.0.4")
 		return w.Body.String()
 	}
 
+	unauthenticated := httptest.NewRecorder()
+	s.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
+	assert.NotContains(t, unauthenticated.Body.String(), "llamaswap_model_")
 	assert.NotContains(t, scrape(), "llamaswap_model_")
 	post("/v1/chat/completions", "canonical", "", http.StatusOK)
 	body := scrape()
@@ -110,6 +130,10 @@ models:
 	post("/v1/chat/completions", "canonical", "canceled", http.StatusOK)
 	post("/v1/chat/completions", "canonical", "zero-negative", http.StatusOK)
 	post("/v1/chat/completions", "other", "cached-only", http.StatusOK)
+	post("/upstream/nick/v1/chat/completions", "ignored", "mixed-scope", http.StatusOK)
+	post("/v1/chat/completions", "nick", "cache-exceeds-input", http.StatusOK)
+	post("/v1/chat/completions", "other", "zero-input", http.StatusOK)
+	post("/v1/chat/completions", "nick", "processed-only", http.StatusOK)
 	post("/v1/chat/completions", "other", "no-text-stream", http.StatusOK)
 	post("/v1/embeddings", "canonical", "", http.StatusOK)
 	// Even a successful reply from a permissive router cannot put an
@@ -117,7 +141,7 @@ models:
 	post("/v1/chat/completions", "not-configured", "", http.StatusOK)
 
 	body = scrape()
-	for name, total := range map[string]int{"input": 82, "output": 23, "cached": 20} {
+	for name, total := range map[string]int{"input": 88, "output": 26, "cached": 28} {
 		metric := "llamaswap_model_" + name + "_tokens_total"
 		assert.Contains(t, body, "# TYPE "+metric+" counter\n")
 		assert.Contains(t, body, fmt.Sprintf("%s{model=\"canonical\"} %d\n", metric, total))

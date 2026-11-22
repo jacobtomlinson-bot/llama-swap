@@ -20,20 +20,18 @@ type radianceParser struct {
 	start   time.Time
 	read    apiReader
 	api     apiUsage
-	timings gjson.Result
+	timings usageBlock
 }
 
 func (p *radianceParser) event(ev gjson.Result) {
 	p.read(ev, &p.api)
-	if t := ev.Get("timings"); t.IsObject() {
-		p.timings = t
-	}
+	p.timings.update(ev.Get("timings"), "cache_n")
 }
 
 func (p *radianceParser) usage() Usage {
 	u := p.api.toUsage(p.start)
 	applyTimings(&u, p.timings)
-	applyRadianceTotal(&u, p.timings)
+	applyRadianceTotal(&u, p.timings.last)
 	return u
 }
 

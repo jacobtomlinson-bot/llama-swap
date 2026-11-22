@@ -20,20 +20,18 @@ type kyojinParser struct {
 	start   time.Time
 	read    apiReader
 	api     apiUsage
-	timings gjson.Result
+	timings usageBlock
 }
 
 func (p *kyojinParser) event(ev gjson.Result) {
 	p.read(ev, &p.api)
-	if t := ev.Get("timings"); t.IsObject() {
-		p.timings = t
-	}
+	p.timings.update(ev.Get("timings"), "cache_n")
 }
 
 func (p *kyojinParser) usage() Usage {
 	u := p.api.toUsage(p.start)
 	applyTimings(&u, p.timings)
-	applyKyojinDrafts(&u, p.timings)
+	applyKyojinDrafts(&u, p.timings.last)
 	return u
 }
 
