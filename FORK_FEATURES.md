@@ -63,6 +63,39 @@ Rates require the underlying server to supply timings or rates recognized by
 the existing usage parser. Token counts alone cannot establish either rate.
 No estimate from total HTTP duration is substituted.
 
+### Token counters
+
+| Counter | Meaning |
+| --- | --- |
+| `llamaswap_model_input_tokens_total` | Reported prompt tokens, including prompt-cache hits and cache writes |
+| `llamaswap_model_output_tokens_total` | Reported generated tokens, including reasoning when included by the backend |
+| `llamaswap_model_cached_tokens_total` | Reported input tokens served from the prompt cache (not cache writes) |
+
+Cached tokens are part of input, not an additional total to add to it.
+The counters cover the same registered canonical models and metered HTTP
+generation routes as the gauges (not embeddings, audio or realtime
+WebSockets). Each successful HTTP 200 request without an observed client
+cancellation contributes once after the handler finishes, using the
+existing normalized usage for JSON or SSE. Repeated or cumulative stream
+frames do not count as separate requests. A stream without reported usage
+(e.g. an OpenAI-compatible server that needs `stream_options.include_usage`)
+may still yield TTFT but does not increment any token counter.
+
+The backend determines what it reports. Positive counts are tallied
+independently; zero, missing, or invalid counts do not increment a counter.
+A series first appears after a positive observation, and partial usage can
+make the input and cached totals cover different request sets. For example,
+Anthropic reports uncached input, cache reads and cache writes separately;
+llama.cpp timings can report processed prompt tokens alongside cache hits,
+or report only processed tokens when neither a full prompt count nor a
+cache count is available. No inferred token counts are added.
+
+Counters are in memory, independent of activity storage and retention.
+They survive backend restarts, unloads and config reloads for canonical IDs
+that remain configured. Removing an ID drops its series; re-adding it starts
+a new series. Restarting llama-swap resets all counters. Use Prometheus
+`rate()` or `increase()` across scrapes rather than summing raw snapshots.
+
 ## CI platforms
 
 This fork runs Linux CI and deliberately removes upstream's Windows CI
@@ -188,6 +221,12 @@ that remove that base.
   Scrape `curl -fsS localhost:8080/metrics | grep '^llamaswap_model_'`.
   Expect positive TTFT, a positive prefill rate, and a generation rate near
   200 for `model="fake-fast"`, with no `model="fast-alias"` sample.
+  To verify the counters too, add `-prompt-tokens 100 -cache-tokens 20`
+  to the fake model's command (keep `-tokens 120`). With no other model
+  traffic, send the aliased streaming request twice and scrape after
+  each completion. The canonical input, output and cached counters
+  should increase by 100, 120 and 20 per request respectively; none
+  should use the alias label.
 
 ### Verify on GitHub Actions
 

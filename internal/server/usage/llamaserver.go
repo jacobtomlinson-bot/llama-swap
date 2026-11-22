@@ -65,12 +65,16 @@ func applyTimings(u *Usage, timings gjson.Result) {
 	// usage block already counted in full, so it is used only when there is
 	// no usage count (e.g. /infill).
 	cached := timings.Get("cache_n")
-	if prompt := timings.Get("prompt_n"); prompt.Exists() && (cached.Exists() || u.Tokens.InputTokens == 0) {
-		u.Tokens.InputTokens = int(prompt.Int() + cached.Int())
+	if n, ok := reportedCount(timings.Get("prompt_n")); ok {
+		if c, ok := reportedCount(cached); ok {
+			if input := addCounts(n, c); input >= 0 {
+				u.Tokens.InputTokens = input
+			}
+		} else if !cached.Exists() && u.Tokens.InputTokens == 0 {
+			u.Tokens.InputTokens = n
+		}
 	}
-	if v := timings.Get("predicted_n"); v.Exists() {
-		u.Tokens.OutputTokens = int(v.Int())
-	}
+	setReported(&u.Tokens.OutputTokens, timings.Get("predicted_n"))
 	if v := timings.Get("prompt_per_second"); v.Exists() {
 		u.Tokens.PromptPerSecond = v.Float()
 	}
@@ -80,9 +84,7 @@ func applyTimings(u *Usage, timings gjson.Result) {
 	if ms := int(timings.Get("prompt_ms").Float() + timings.Get("predicted_ms").Float()); ms > u.DurationMs {
 		u.DurationMs = ms
 	}
-	if cached.Exists() {
-		u.Tokens.CachedTokens = int(cached.Int())
-	}
+	setReported(&u.Tokens.CachedTokens, cached)
 	if drafted, accepted := timings.Get("draft_n"), timings.Get("draft_n_accepted"); drafted.Exists() && accepted.Exists() {
 		u.Tokens.DraftTokens = int(drafted.Int())
 		u.Tokens.DraftAccTokens = int(accepted.Int())

@@ -28,8 +28,9 @@ func readOpenAIUsage(ev gjson.Result, u *apiUsage) {
 		} else {
 			found = setCount(&u.output, b.Get("output_tokens")) || found
 		}
-		if !setReported(&u.cached, b.Get("prompt_tokens_details.cached_tokens")) {
-			setReported(&u.cached, b.Get("input_tokens_details.cached_tokens"))
+		if setReported(&u.cached, b.Get("prompt_tokens_details.cached_tokens")) ||
+			setReported(&u.cached, b.Get("input_tokens_details.cached_tokens")) {
+			found = true
 		}
 		if !setReported(&u.reasoning, b.Get("completion_tokens_details.reasoning_tokens")) {
 			setReported(&u.reasoning, b.Get("output_tokens_details.reasoning_tokens"))

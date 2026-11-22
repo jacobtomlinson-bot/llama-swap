@@ -134,6 +134,7 @@ func newTestServerWithConfig(cfg config.Config, local router.LocalRouter, peer r
 		shutdownFn:  cancel,
 		pause:       NewPauseState(),
 	}
+	s.metrics.initTokenCounters(cfg, nil)
 	s.routes()
 	return s
 }
@@ -213,7 +214,7 @@ func TestServer_New_GroupConfig(t *testing.T) {
 		t.Fatalf("sqlite.New: %v", err)
 	}
 	defer st.Close()
-	s, err := New(cfg, discard, nil, st, BuildInfo{}, nil, nil, nil, nil)
+	s, err := New(cfg, discard, nil, st, BuildInfo{}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New (group): %v", err)
 	}
@@ -243,7 +244,7 @@ func TestServer_New_MatrixConfig(t *testing.T) {
 		t.Fatalf("sqlite.New: %v", err)
 	}
 	defer st.Close()
-	s, err := New(cfg, discard, nil, st, BuildInfo{}, nil, nil, nil, nil)
+	s, err := New(cfg, discard, nil, st, BuildInfo{}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New (matrix): %v", err)
 	}
@@ -531,7 +532,7 @@ func TestServer_New_OnStartupProfile(t *testing.T) {
 		t.Fatalf("sqlite.New: %v", err)
 	}
 	defer st.Close()
-	s, err := New(cfg, discard, nil, st, BuildInfo{}, nil, nil, nil, nil)
+	s, err := New(cfg, discard, nil, st, BuildInfo{}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New (startup profile): %v", err)
 	}
