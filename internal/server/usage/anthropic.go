@@ -17,7 +17,9 @@ func readAnthropicUsage(ev gjson.Result, u *apiUsage) {
 			continue
 		}
 		found := setCount(&u.input, b.Get("input_tokens"))
-		u.anthropicInputReported = u.anthropicInputReported || found
+		if found {
+			u.prompt = promptProcessed
+		}
 		found = setCount(&u.output, b.Get("output_tokens")) || found
 		found = setReported(&u.cached, b.Get("cache_read_input_tokens")) || found
 		found = setCount(&u.cacheWrite, b.Get("cache_creation_input_tokens")) || found

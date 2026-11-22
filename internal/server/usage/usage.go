@@ -24,6 +24,24 @@ type Usage struct {
 	Found      bool
 	Tokens     store.TokenMetrics
 	DurationMs int
+	prompt     promptScope
+}
+
+type promptScope uint8
+
+const (
+	promptUnknown promptScope = iota
+	promptFull
+	promptProcessed // a processed count without an independently reported cache count
+)
+
+// checked rejects a cache count that cannot be a subset of a known full
+// prompt. In particular, a reported zero total is not a missing total.
+func (u Usage) checked() Usage {
+	if u.prompt == promptFull && u.Tokens.CachedTokens > u.Tokens.InputTokens {
+		u.Tokens.CachedTokens = -1
+	}
+	return u
 }
 
 // usageExtractor knows how one kind of upstream reports usage. Each
@@ -91,7 +109,7 @@ func Extract(u hint.Upstream, path, contentType string, body []byte, start time.
 		if !usage.Found {
 			return Usage{}, fmt.Errorf("no valid JSON data found in stream")
 		}
-		return usage, nil
+		return usage.checked(), nil
 	}
 
 	if !gjson.ValidBytes(body) {
@@ -105,7 +123,7 @@ func Extract(u hint.Upstream, path, contentType string, body []byte, start time.
 	if !usage.Found && parsed.Get("usage").Exists() {
 		usage.Found = true
 	}
-	return usage, nil
+	return usage.checked(), nil
 }
 
 // IsEventStream identifies an SSE response independently of optional parameters.
@@ -153,10 +171,8 @@ type apiUsage struct {
 	input, output     int
 	cached, reasoning int // -1 when not reported
 	found             bool
-	// Anthropic reports uncached input and the two cache components
-	// separately. Only assemble a prompt total if it reported input.
-	anthropicInputReported bool
-	cacheWrite             int
+	prompt            promptScope
+	cacheWrite        int
 }
 
 func newAPIUsage() apiUsage { return apiUsage{cached: -1, reasoning: -1} }
@@ -179,12 +195,20 @@ func apiReaderFor(path string) apiReader {
 // toUsage turns the counts into a Usage with every server-reported field
 // (rates, draft counts) unknown and the duration measured from start.
 func (a apiUsage) toUsage(start time.Time) Usage {
-	input := a.input
-	if a.anthropicInputReported {
+	input, scope := a.input, a.prompt
+	// Anthropic's wire input is uncached only. Its API cache reads and
+	// writes are separately reported components of that same prompt.
+	if scope == promptProcessed {
 		input = addCounts(input, max(a.cached, 0), a.cacheWrite)
+		if input >= 0 {
+			scope = promptFull
+		} else {
+			scope = promptUnknown
+		}
 	}
 	return Usage{
-		Found: a.found,
+		Found:  a.found,
+		prompt: scope,
 		Tokens: store.TokenMetrics{
 			InputTokens:     input,
 			OutputTokens:    a.output,
@@ -196,6 +220,25 @@ func (a apiUsage) toUsage(start time.Time) Usage {
 			DraftAccTokens:  -1,
 		},
 		DurationMs: int(time.Since(start).Milliseconds()),
+	}
+}
+
+// usageBlock retains the latest backend-specific block and the last valid
+// cache count it reported. A later partial frame does not erase the cache
+// observation, but only fields in the same block can form a timing total.
+type usageBlock struct {
+	last, cache gjson.Result
+}
+
+func (b *usageBlock) update(block gjson.Result, cacheField string) {
+	if !block.IsObject() {
+		return
+	}
+	b.last = block
+	if cache := block.Get(cacheField); cache.Exists() {
+		if _, ok := reportedCount(cache); ok {
+			b.cache = cache
+		}
 	}
 }
 

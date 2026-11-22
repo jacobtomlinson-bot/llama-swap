@@ -18,15 +18,13 @@ type llamaServerParser struct {
 	start   time.Time
 	read    apiReader
 	api     apiUsage
-	timings gjson.Result
+	timings usageBlock
 }
 
 func (p *llamaServerParser) event(ev gjson.Result) {
 	ev = lastArrayElement(ev)
 	p.read(ev, &p.api)
-	if t := ev.Get("timings"); t.IsObject() {
-		p.timings = t
-	}
+	p.timings.update(ev.Get("timings"), "cache_n")
 }
 
 func (p *llamaServerParser) usage() Usage {
@@ -55,23 +53,26 @@ func lastArrayElement(ev gjson.Result) gjson.Result {
 // predicted_per_second the rates, prompt_ms + predicted_ms the duration
 // (when longer than wall time), and draft_n / draft_n_accepted the
 // speculative decoding counters.
-func applyTimings(u *Usage, timings gjson.Result) {
+func applyTimings(u *Usage, block usageBlock) {
+	timings := block.last
 	if !timings.Exists() {
 		return
 	}
 	u.Found = true
-	// Each field only replaces what the usage block reported when it is
-	// present. Without cache_n, prompt_n alone would undercount a prompt the
-	// usage block already counted in full, so it is used only when there is
-	// no usage count (e.g. /infill).
-	cached := timings.Get("cache_n")
+	setReported(&u.Tokens.CachedTokens, block.cache)
+	currentCache := timings.Get("cache_n")
 	if n, ok := reportedCount(timings.Get("prompt_n")); ok {
-		if c, ok := reportedCount(cached); ok {
-			if input := addCounts(n, c); input >= 0 {
-				u.Tokens.InputTokens = input
+		if c, ok := reportedCount(currentCache); ok {
+			// A matched timings pair can refine the total, but not if
+			// the claimed hits contradict an already known full prompt.
+			if input := addCounts(n, c); input >= 0 &&
+				(u.prompt != promptFull || c <= u.Tokens.InputTokens) {
+				u.Tokens.InputTokens, u.prompt = input, promptFull
 			}
-		} else if !cached.Exists() && u.Tokens.InputTokens == 0 {
-			u.Tokens.InputTokens = n
+		} else if !currentCache.Exists() && u.prompt == promptUnknown && u.Tokens.CachedTokens < 0 {
+			// Legacy processed-only fallback (e.g. infill). Never add a
+			// cache count from another source/frame to this prompt_n.
+			u.Tokens.InputTokens, u.prompt = n, promptProcessed
 		}
 	}
 	setReported(&u.Tokens.OutputTokens, timings.Get("predicted_n"))
@@ -84,7 +85,6 @@ func applyTimings(u *Usage, timings gjson.Result) {
 	if ms := int(timings.Get("prompt_ms").Float() + timings.Get("predicted_ms").Float()); ms > u.DurationMs {
 		u.DurationMs = ms
 	}
-	setReported(&u.Tokens.CachedTokens, cached)
 	if drafted, accepted := timings.Get("draft_n"), timings.Get("draft_n_accepted"); drafted.Exists() && accepted.Exists() {
 		u.Tokens.DraftTokens = int(drafted.Int())
 		u.Tokens.DraftAccTokens = int(accepted.Int())

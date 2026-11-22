@@ -42,7 +42,7 @@ func TestUsage_LlamaServer_Infill(t *testing.T) {
 
 func TestUsage_LlamaServer_TimingsOverrideUsage(t *testing.T) {
 	u := parseUsageJSON(t, hint.LlamaServer, "/v1/chat/completions",
-		`{"usage":{"prompt_tokens":1,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}},`+
+		`{"usage":{"prompt_tokens":28,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}},`+
 			`"timings":{"prompt_n":20,"predicted_n":50,"cache_n":8}}`)
 	assert.Equal(t, 28, u.Tokens.InputTokens, "prompt_n counts only processed tokens")
 	assert.Equal(t, 50, u.Tokens.OutputTokens)

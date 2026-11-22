@@ -19,9 +19,12 @@ func readOpenAIUsage(ev gjson.Result, u *apiUsage) {
 		}
 		found := false
 		if v := b.Get("prompt_tokens"); v.Exists() {
-			found = setCount(&u.input, v) || found
+			found = setCount(&u.input, v)
 		} else {
-			found = setCount(&u.input, b.Get("input_tokens")) || found
+			found = setCount(&u.input, b.Get("input_tokens"))
+		}
+		if found {
+			u.prompt = promptFull
 		}
 		if v := b.Get("completion_tokens"); v.Exists() {
 			found = setCount(&u.output, v) || found

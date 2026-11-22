@@ -22,14 +22,12 @@ type tensorFoldParser struct {
 	start      time.Time
 	read       apiReader
 	api        apiUsage
-	tensorfold gjson.Result
+	tensorfold usageBlock
 }
 
 func (p *tensorFoldParser) event(ev gjson.Result) {
 	p.read(ev, &p.api)
-	if tf := ev.Get("tensorfold"); tf.IsObject() {
-		p.tensorfold = tf
-	}
+	p.tensorfold.update(ev.Get("tensorfold"), "cached")
 }
 
 func (p *tensorFoldParser) usage() Usage {
@@ -47,12 +45,13 @@ func (p *tensorFoldParser) usage() Usage {
 // decode duration. A duration or rate that is missing, not a number, not
 // positive, or not finite leaves the rate unknown. The phase durations do
 // not change DurationMs, which stays the wall time of the request.
-func applyTensorFold(u *Usage, tensorfold gjson.Result) {
+func applyTensorFold(u *Usage, block usageBlock) {
+	tensorfold := block.last
 	if !tensorfold.Exists() {
 		return
 	}
 	u.Found = true
-	setReported(&u.Tokens.CachedTokens, tensorfold.Get("cached"))
+	setReported(&u.Tokens.CachedTokens, block.cache)
 	prefill := tensorfold.Get("prefill_s")
 	if prefill.Type != gjson.Number {
 		prefill = tensorfold.Get("prefill_seconds")

@@ -86,9 +86,15 @@ independently; zero, missing, or invalid counts do not increment a counter.
 A series first appears after a positive observation, and partial usage can
 make the input and cached totals cover different request sets. For example,
 Anthropic reports uncached input, cache reads and cache writes separately;
-llama.cpp timings can report processed prompt tokens alongside cache hits,
-or report only processed tokens when neither a full prompt count nor a
-cache count is available. No inferred token counts are added.
+llama.cpp timings can report processed prompt tokens alongside cache hits.
+Only a matching pair from the same timings block can be added together.
+If timings report just processed tokens and no recognized source reports a
+cache count or full prompt total, the processed count is used as a fallback.
+If a cache count is reported separately and the full prompt is unknown,
+the cache count and any valid output still count, but no input is tallied.
+A cache count greater than a known full prompt (including a reported zero)
+is ignored without dropping valid input or output. No inferred token
+counts are added.
 
 Counters are in memory, independent of activity storage and retention.
 They survive backend restarts, unloads and config reloads for canonical IDs
