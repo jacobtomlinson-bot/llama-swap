@@ -25,7 +25,7 @@ type autoParser struct {
 	read       apiReader
 	api        apiUsage
 	block      gjson.Result // last usage block
-	timings    usageBlock
+	timings    timingBlock
 	metrics    gjson.Result
 	tensorfold usageBlock
 }
@@ -36,7 +36,7 @@ func (p *autoParser) event(ev gjson.Result) {
 	if b := ev.Get("usage"); b.IsObject() {
 		p.block = b
 	}
-	p.timings.update(ev.Get("timings"), "cache_n")
+	p.timings.update(ev.Get("timings"))
 	if m := ev.Get("metrics"); m.IsObject() {
 		p.metrics = m
 	}

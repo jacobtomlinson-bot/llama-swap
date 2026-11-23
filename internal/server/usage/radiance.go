@@ -20,12 +20,12 @@ type radianceParser struct {
 	start   time.Time
 	read    apiReader
 	api     apiUsage
-	timings usageBlock
+	timings timingBlock
 }
 
 func (p *radianceParser) event(ev gjson.Result) {
 	p.read(ev, &p.api)
-	p.timings.update(ev.Get("timings"), "cache_n")
+	p.timings.update(ev.Get("timings"))
 }
 
 func (p *radianceParser) usage() Usage {

@@ -88,6 +88,8 @@ make the input and cached totals cover different request sets. For example,
 Anthropic reports uncached input, cache reads and cache writes separately;
 llama.cpp timings can report processed prompt tokens alongside cache hits.
 Only a matching pair from the same timings block can be added together.
+A later rate-only frame does not erase an earlier complete prompt count
+or the latest valid output count.
 If timings report just processed tokens and no recognized source reports a
 cache count or full prompt total, the processed count is used as a fallback.
 If a cache count is reported separately and the full prompt is unknown,
