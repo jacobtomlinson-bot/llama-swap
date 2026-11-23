@@ -17,13 +17,19 @@ func readOpenAIUsage(ev gjson.Result, u *apiUsage) {
 		if !b.IsObject() {
 			continue
 		}
-		found := false
-		if v := b.Get("prompt_tokens"); v.Exists() {
-			found = setCount(&u.input, v)
-		} else {
-			found = setCount(&u.input, b.Get("input_tokens"))
+		input := b.Get("prompt_tokens")
+		if !input.Exists() {
+			input = b.Get("input_tokens")
 		}
-		if found {
+		// Validate the cache against the total in this block, not an
+		// earlier retained prompt that might mask a contradiction.
+		frameInput, hasFrameInput := reportedCount(input)
+		found := hasFrameInput
+		if hasFrameInput {
+			// API streams may repeat a zero placeholder after a count.
+			if frameInput > 0 {
+				u.input = frameInput
+			}
 			u.prompt = promptFull
 		}
 		if v := b.Get("completion_tokens"); v.Exists() {
@@ -31,8 +37,12 @@ func readOpenAIUsage(ev gjson.Result, u *apiUsage) {
 		} else {
 			found = setCount(&u.output, b.Get("output_tokens")) || found
 		}
-		if setReported(&u.cached, b.Get("prompt_tokens_details.cached_tokens")) ||
-			setReported(&u.cached, b.Get("input_tokens_details.cached_tokens")) {
+		cache, hasCache := reportedCount(b.Get("prompt_tokens_details.cached_tokens"))
+		if !hasCache {
+			cache, hasCache = reportedCount(b.Get("input_tokens_details.cached_tokens"))
+		}
+		if hasCache && (!hasFrameInput || cache <= frameInput) {
+			u.cached = cache
 			found = true
 		}
 		if !setReported(&u.reasoning, b.Get("completion_tokens_details.reasoning_tokens")) {

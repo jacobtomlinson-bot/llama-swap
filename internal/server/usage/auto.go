@@ -32,11 +32,10 @@ type autoParser struct {
 
 func (p *autoParser) event(ev gjson.Result) {
 	ev = lastArrayElement(ev)
-	p.read(ev, &p.api)
+	p.timings.readEvent(ev, p.read, &p.api)
 	if b := ev.Get("usage"); b.IsObject() {
 		p.block = b
 	}
-	p.timings.update(ev.Get("timings"))
 	if m := ev.Get("metrics"); m.IsObject() {
 		p.metrics = m
 	}
