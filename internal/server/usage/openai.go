@@ -11,7 +11,8 @@ import "github.com/tidwall/gjson"
 //     response.completed event) with input_tokens, output_tokens,
 //     input_tokens_details.cached_tokens and
 //     output_tokens_details.reasoning_tokens
-func readOpenAIUsage(ev gjson.Result, u *apiUsage) {
+func readOpenAIUsage(ev gjson.Result, u *apiUsage) int {
+	frameTotal := -1
 	for _, path := range []string{"usage", "response.usage"} {
 		b := ev.Get(path)
 		if !b.IsObject() {
@@ -27,10 +28,10 @@ func readOpenAIUsage(ev gjson.Result, u *apiUsage) {
 		found := hasFrameInput
 		if hasFrameInput {
 			// API streams may repeat a zero placeholder after a count.
-			if frameInput > 0 {
-				u.input = frameInput
+			frameTotal = frameInput
+			if frameInput > 0 || u.prompt != promptFull {
+				u.recordFullPrompt(frameInput)
 			}
-			u.prompt = promptFull
 		}
 		if v := b.Get("completion_tokens"); v.Exists() {
 			found = setCount(&u.output, v) || found
@@ -41,8 +42,8 @@ func readOpenAIUsage(ev gjson.Result, u *apiUsage) {
 		if !hasCache {
 			cache, hasCache = reportedCount(b.Get("input_tokens_details.cached_tokens"))
 		}
-		if hasCache && (!hasFrameInput || cache <= frameInput) {
-			u.cached = cache
+		if hasCache {
+			u.recordCache(cache, frameTotal)
 			found = true
 		}
 		if !setReported(&u.reasoning, b.Get("completion_tokens_details.reasoning_tokens")) {
@@ -52,4 +53,5 @@ func readOpenAIUsage(ev gjson.Result, u *apiUsage) {
 			u.found = true
 		}
 	}
+	return frameTotal
 }

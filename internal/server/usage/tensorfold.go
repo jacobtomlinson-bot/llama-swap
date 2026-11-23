@@ -22,12 +22,12 @@ type tensorFoldParser struct {
 	start      time.Time
 	read       apiReader
 	api        apiUsage
-	tensorfold usageBlock
+	tensorfold gjson.Result
 }
 
 func (p *tensorFoldParser) event(ev gjson.Result) {
-	p.read(ev, &p.api)
-	p.tensorfold.update(ev.Get("tensorfold"), "cached")
+	frameInput := p.read(ev, &p.api)
+	updateTensorFold(ev, &p.tensorfold, &p.api, frameInput)
 }
 
 func (p *tensorFoldParser) usage() Usage {
@@ -36,8 +36,17 @@ func (p *tensorFoldParser) usage() Usage {
 	return u
 }
 
-// applyTensorFold applies a tensorfold object (#1226). cached replaces the
-// usage-derived cached count. The prompt rate is the uncached prompt tokens
+func updateTensorFold(ev gjson.Result, latest *gjson.Result, api *apiUsage, frameInput int) {
+	if block := ev.Get("tensorfold"); block.IsObject() {
+		*latest = block
+		if cached, ok := reportedCount(block.Get("cached")); ok {
+			api.recordCache(cached, frameInput)
+		}
+	}
+}
+
+// applyTensorFold applies a tensorfold object's rates (#1226).
+// The prompt rate is the uncached prompt tokens
 // over the prefill duration ("prefill_s" in #1226, "prefill_seconds" in
 // current servers). The generation rate is the server-reported
 // tokens_per_second when present, otherwise output tokens over decode_s;
@@ -45,13 +54,11 @@ func (p *tensorFoldParser) usage() Usage {
 // decode duration. A duration or rate that is missing, not a number, not
 // positive, or not finite leaves the rate unknown. The phase durations do
 // not change DurationMs, which stays the wall time of the request.
-func applyTensorFold(u *Usage, block usageBlock) {
-	tensorfold := block.last
+func applyTensorFold(u *Usage, tensorfold gjson.Result) {
 	if !tensorfold.Exists() {
 		return
 	}
 	u.Found = true
-	setReported(&u.Tokens.CachedTokens, block.cache)
 	prefill := tensorfold.Get("prefill_s")
 	if prefill.Type != gjson.Number {
 		prefill = tensorfold.Get("prefill_seconds")

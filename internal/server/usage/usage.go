@@ -164,23 +164,42 @@ func sseData(line []byte) []byte {
 	return data
 }
 
-// apiUsage holds the token counts read from an API usage block. Each wire
-// format has its own reader (openai.go, anthropic.go); servers
-// add their own fields on top.
+// apiUsage accumulates normalized counts for one request in event order.
+// Anthropic's raw components stay separate from the normalized totals.
 type apiUsage struct {
 	input, output     int
 	cached, reasoning int // -1 when not reported
 	found             bool
 	prompt            promptScope
-	cacheWrite        int
+	anthropic         anthropicPrompt
 }
 
 func newAPIUsage() apiUsage { return apiUsage{cached: -1, reasoning: -1} }
 
-// apiReader reads the usage block of one wire format from an event into u.
-// Streams report usage across several events, so a reader keeps earlier
-// values unless the event carries a new non-zero count.
-type apiReader func(ev gjson.Result, u *apiUsage)
+func (a *apiUsage) recordFullPrompt(input int) {
+	a.input, a.prompt = input, promptFull
+	if a.cached > input {
+		a.cached = -1
+	}
+}
+
+// A cache observation must fit both a full prompt explicitly reported in
+// this frame (including an API zero placeholder) and the retained total.
+func (a *apiUsage) cacheFits(cache, frameInput int) bool {
+	return (frameInput < 0 || cache <= frameInput) &&
+		(a.prompt != promptFull || cache <= a.input)
+}
+
+func (a *apiUsage) recordCache(cache, frameInput int) {
+	if a.cacheFits(cache, frameInput) {
+		a.cached = cache
+	}
+}
+
+// apiReader merges API observations and returns the frame's full prompt
+// count, or -1 if absent. Backend-specific counts use that bound before
+// updating the same accumulator.
+type apiReader func(ev gjson.Result, u *apiUsage) int
 
 // apiReaderFor picks the wire format from the endpoint path. The Anthropic
 // Messages API (/v1/messages, or /v/messages without the version) has its
@@ -195,22 +214,11 @@ func apiReaderFor(path string) apiReader {
 // toUsage turns the counts into a Usage with every server-reported field
 // (rates, draft counts) unknown and the duration measured from start.
 func (a apiUsage) toUsage(start time.Time) Usage {
-	input, scope := a.input, a.prompt
-	// Anthropic's wire input is uncached only. Its API cache reads and
-	// writes are separately reported components of that same prompt.
-	if scope == promptProcessed {
-		input = addCounts(input, max(a.cached, 0), a.cacheWrite)
-		if input >= 0 {
-			scope = promptFull
-		} else {
-			scope = promptUnknown
-		}
-	}
 	return Usage{
 		Found:  a.found,
-		prompt: scope,
+		prompt: a.prompt,
 		Tokens: store.TokenMetrics{
-			InputTokens:     input,
+			InputTokens:     a.input,
 			OutputTokens:    a.output,
 			CachedTokens:    a.cached,
 			ReasoningTokens: a.reasoning,
@@ -220,25 +228,6 @@ func (a apiUsage) toUsage(start time.Time) Usage {
 			DraftAccTokens:  -1,
 		},
 		DurationMs: int(time.Since(start).Milliseconds()),
-	}
-}
-
-// usageBlock retains the latest backend-specific block and the last valid
-// cache count it reported. A later partial frame does not erase the cache
-// observation, but only fields in the same block can form a timing total.
-type usageBlock struct {
-	last, cache gjson.Result
-}
-
-func (b *usageBlock) update(block gjson.Result, cacheField string) {
-	if !block.IsObject() {
-		return
-	}
-	b.last = block
-	if cache := block.Get(cacheField); cache.Exists() {
-		if _, ok := reportedCount(cache); ok {
-			b.cache = cache
-		}
 	}
 }
 

@@ -27,19 +27,20 @@ type autoParser struct {
 	block      gjson.Result // last usage block
 	timings    timingBlock
 	metrics    gjson.Result
-	tensorfold usageBlock
+	tensorfold gjson.Result
 }
 
 func (p *autoParser) event(ev gjson.Result) {
 	ev = lastArrayElement(ev)
-	p.timings.readEvent(ev, p.read, &p.api)
+	frameInput := p.read(ev, &p.api)
+	updateTensorFold(ev, &p.tensorfold, &p.api, frameInput)
+	p.timings.update(ev.Get("timings"), &p.api, frameInput)
 	if b := ev.Get("usage"); b.IsObject() {
 		p.block = b
 	}
 	if m := ev.Get("metrics"); m.IsObject() {
 		p.metrics = m
 	}
-	p.tensorfold.update(ev.Get("tensorfold"), "cached")
 }
 
 func (p *autoParser) usage() Usage {

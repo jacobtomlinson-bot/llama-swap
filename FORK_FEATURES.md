@@ -88,19 +88,23 @@ make the input and cached totals cover different request sets. For example,
 Anthropic reports uncached input, cache reads and cache writes separately;
 llama.cpp timings can report processed prompt tokens alongside cache hits.
 Only a matching pair from the same timings block can be added together.
-A later rate-only frame does not erase an earlier complete prompt count
-or the latest valid output count. For output, a later count can replace an
-earlier count from either source; a valid timing count takes precedence
-over API usage in the same frame. API zero placeholders do not replace an
-earlier nonzero count.
-If timings report just processed tokens and no recognized source reports a
-cache count or full prompt total, the processed count is used as a fallback.
-If a cache count is reported separately and the full prompt is unknown,
-the cache count and any valid output still count, but no input is tallied.
-A cache count greater than a known full prompt (including a reported zero)
-is ignored without dropping valid input or output. API cache counts are
-checked against the prompt total in their own usage block before merging
-with earlier observations. No inferred token counts are added.
+Valid counts are applied in frame order; within a frame the parser reads
+API usage first, then backend-specific observations (TensorFold before
+llama.cpp-style timings when both are present). Missing or invalid values
+and rate-only frames do not overwrite counts. API input/output zero
+placeholders do not replace earlier nonzero counts, but an explicit API
+prompt zero still bounds new cache claims in that frame.
+
+A cache observation must fit both the known whole prompt and any explicit
+API prompt total in its own frame. An impossible cache count is ignored,
+along with any prompt total derived from that count, without discarding a
+previous compatible cache count. A new whole prompt supersedes earlier
+prompt totals and clears an earlier cache count that no longer fits.
+
+If no recognized source reports a cache count or full prompt total, a
+processed-only count can be used as a fallback even across later rate-only
+frames. Otherwise, if the full prompt is unknown, only valid cache and
+output count. No inferred token counts are added.
 
 Counters are in memory, independent of activity storage and retention.
 They survive backend restarts, unloads and config reloads for canonical IDs

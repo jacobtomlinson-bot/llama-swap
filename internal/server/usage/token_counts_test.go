@@ -99,7 +99,7 @@ func TestUsage_CompleteCountsAcrossPartialTimingFrames(t *testing.T) {
 				complete, `{"timings":{"cache_n":16}}`, rates)
 			assert.Equal(t, 15, u.Tokens.InputTokens)
 			assert.Equal(t, 3, u.Tokens.OutputTokens)
-			assert.Equal(t, -1, u.Tokens.CachedTokens)
+			assert.Equal(t, 4, u.Tokens.CachedTokens)
 
 			u = parseUsageStream(t, upstream, "/v1/chat/completions",
 				`{"usage":{"prompt_tokens":2}}`, complete, rates)
@@ -174,4 +174,62 @@ func TestUsage_RejectsContradictoryCacheBeforeMerging(t *testing.T) {
 	assert.Equal(t, 10, u.Tokens.InputTokens)
 	assert.Equal(t, 5, u.Tokens.OutputTokens)
 	assert.Equal(t, -1, u.Tokens.CachedTokens)
+}
+
+func TestUsage_TokenObservationOrder(t *testing.T) {
+	const (
+		api     = `{"usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":6}}}`
+		timing  = `{"timings":{"prompt_n":11,"cache_n":4,"predicted_n":3}}`
+		same    = `{"usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":6}},"timings":{"prompt_n":11,"cache_n":4,"predicted_n":3}}`
+		rates   = `{"timings":{"prompt_per_second":250,"predicted_per_second":55}}`
+		apiZero = `{"usage":{"prompt_tokens":0,"completion_tokens":0}}`
+	)
+	for _, upstream := range []hint.Upstream{hint.Unknown, hint.LlamaServer, hint.Halogen, hint.Radiance, hint.Kyojin} {
+		t.Run(string(upstream), func(t *testing.T) {
+			for _, tc := range []struct {
+				name                string
+				frames              []string
+				input, output, hits int
+			}{
+				{"API after timing", []string{timing, api}, 20, 5, 6},
+				{"timing after API", []string{api, timing}, 15, 3, 4},
+				{"same-frame backend precedence", []string{same}, 15, 3, 4},
+				{"cache before prompt, compatible", []string{`{"timings":{"cache_n":4}}`, `{"usage":{"prompt_tokens":7}}`}, 7, 0, 4},
+				{"cache before prompt, incompatible", []string{`{"timings":{"cache_n":8}}`, `{"usage":{"prompt_tokens":7}}`}, 7, 0, -1},
+				{"API cache only updates within bound", []string{timing, `{"usage":{"prompt_tokens_details":{"cached_tokens":7}}}`}, 15, 3, 7},
+				{"timing cache only updates within bound", []string{api, `{"timings":{"cache_n":7}}`}, 20, 5, 7},
+				{"known zero bounds later cache", []string{apiZero, `{"timings":{"cache_n":1}}`}, 0, 0, -1},
+				{"API zero placeholder", []string{timing, apiZero}, 15, 3, 4},
+				{"zero timing pair", []string{timing, `{"timings":{"prompt_n":0,"cache_n":0,"predicted_n":0}}`}, 0, 0, 0},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					u := parseUsageStream(t, upstream, "/v1/chat/completions", append(tc.frames, rates)...)
+					assert.Equal(t, tc.input, u.Tokens.InputTokens)
+					assert.Equal(t, tc.output, u.Tokens.OutputTokens)
+					assert.Equal(t, tc.hits, u.Tokens.CachedTokens)
+					assert.Equal(t, 250.0, u.Tokens.PromptPerSecond)
+					assert.Equal(t, 55.0, u.Tokens.TokensPerSecond)
+				})
+			}
+		})
+	}
+}
+
+func TestUsage_ProviderPromptComponentsStaySeparate(t *testing.T) {
+	u := parseUsageStream(t, hint.Unknown, "/v1/messages",
+		`{"message":{"usage":{"input_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":1}}}`,
+		`{"timings":{"prompt_n":8,"cache_n":2,"predicted_n":3}}`,
+		`{"usage":{"output_tokens":5}}`)
+	assert.Equal(t, 10, u.Tokens.InputTokens)
+	assert.Equal(t, 5, u.Tokens.OutputTokens)
+	assert.Equal(t, 2, u.Tokens.CachedTokens)
+
+	for _, upstream := range []hint.Upstream{hint.Unknown, hint.TensorFold} {
+		u := parseUsageStream(t, upstream, "/v1/chat/completions",
+			`{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":2}}}`,
+			`{"tensorfold":{"cached":11}}`, `{"tensorfold":{"tokens_per_second":7}}`)
+		assert.Equal(t, 10, u.Tokens.InputTokens)
+		assert.Equal(t, 2, u.Tokens.CachedTokens)
+		assert.Equal(t, 7.0, u.Tokens.TokensPerSecond)
+	}
 }
