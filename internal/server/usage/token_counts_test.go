@@ -72,3 +72,40 @@ func TestUsage_CacheAcrossPartialTimingFrames(t *testing.T) {
 	assert.Equal(t, 0, u.Tokens.InputTokens)
 	assert.Equal(t, 9, u.Tokens.CachedTokens)
 }
+
+func TestUsage_CompleteCountsAcrossPartialTimingFrames(t *testing.T) {
+	const (
+		complete = `{"timings":{"prompt_n":11,"cache_n":4,"predicted_n":3,"prompt_per_second":150,"predicted_per_second":30}}`
+		rates    = `{"timings":{"prompt_per_second":250,"predicted_per_second":55}}`
+	)
+	for _, upstream := range []hint.Upstream{hint.Unknown, hint.LlamaServer, hint.Halogen, hint.Radiance, hint.Kyojin} {
+		t.Run(string(upstream), func(t *testing.T) {
+			u := parseUsageStream(t, upstream, "/v1/chat/completions",
+				complete, `{"timings":{"prompt_n":70,"predicted_n":5}}`,
+				`{"timings":{"prompt_n":-1,"cache_n":-1,"predicted_n":-1}}`, rates)
+			assert.Equal(t, 15, u.Tokens.InputTokens)
+			assert.Equal(t, 5, u.Tokens.OutputTokens)
+			assert.Equal(t, 4, u.Tokens.CachedTokens)
+			assert.Equal(t, 250.0, u.Tokens.PromptPerSecond)
+			assert.Equal(t, 55.0, u.Tokens.TokensPerSecond)
+
+			u = parseUsageStream(t, upstream, "/v1/chat/completions",
+				complete, `{"timings":{"prompt_n":0,"cache_n":0,"predicted_n":0}}`, rates)
+			assert.Equal(t, 0, u.Tokens.InputTokens)
+			assert.Equal(t, 0, u.Tokens.OutputTokens)
+			assert.Equal(t, 0, u.Tokens.CachedTokens)
+
+			u = parseUsageStream(t, upstream, "/v1/chat/completions",
+				complete, `{"timings":{"cache_n":16}}`, rates)
+			assert.Equal(t, 15, u.Tokens.InputTokens)
+			assert.Equal(t, 3, u.Tokens.OutputTokens)
+			assert.Equal(t, -1, u.Tokens.CachedTokens)
+
+			u = parseUsageStream(t, upstream, "/v1/chat/completions",
+				`{"usage":{"prompt_tokens":2}}`, complete, rates)
+			assert.Equal(t, 2, u.Tokens.InputTokens)
+			assert.Equal(t, 3, u.Tokens.OutputTokens)
+			assert.Equal(t, -1, u.Tokens.CachedTokens)
+		})
+	}
+}

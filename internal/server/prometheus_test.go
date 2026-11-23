@@ -43,6 +43,13 @@ models:
 				fmt.Fprint(w, "data: {\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":6}},\"timings\":{\"prompt_per_second\":200,\"predicted_per_second\":40}}\n\n")
 			}
 			fmt.Fprint(w, "data: [DONE]\n\n")
+		case "partial-timings-stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			for range 2 {
+				fmt.Fprint(w, `data: {"timings":{"prompt_n":11,"cache_n":4,"predicted_n":3,"prompt_per_second":150,"predicted_per_second":30}}`+"\n\n")
+			}
+			fmt.Fprint(w, `data: {"timings":{"predicted_n":5}}`+"\n\n")
+			fmt.Fprint(w, `data: {"timings":{"prompt_per_second":250,"predicted_per_second":55}}`+"\n\ndata: [DONE]\n\n")
 		case "no-text-stream":
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
@@ -158,6 +165,15 @@ models:
 	assert.NotContains(t, body, "model=\"nick\"")
 	assert.NotContains(t, body, "model=\"ignored\"")
 	assert.NotContains(t, body, "model=\"not-configured\"")
+
+	post("/v1/chat/completions", "nick", "partial-timings-stream", http.StatusOK)
+	body = scrape()
+	for name, total := range map[string]int{"input": 103, "output": 31, "cached": 32} {
+		assert.Contains(t, body, fmt.Sprintf("llamaswap_model_%s_tokens_total{model=\"canonical\"} %d\n", name, total))
+	}
+	assert.Contains(t, body, "llamaswap_model_prefill_tokens_per_second{model=\"canonical\"} 250\n")
+	assert.Contains(t, body, "llamaswap_model_generation_tokens_per_second{model=\"canonical\"} 55\n")
+	assert.NotContains(t, body, "model=\"nick\"")
 }
 
 func TestResponseBodyCopier_FirstOutput(t *testing.T) {
