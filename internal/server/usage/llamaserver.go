@@ -7,7 +7,7 @@ import (
 )
 
 // llamaServerExtractor reads the API usage block plus llama-server's
-// timings block, which is more precise and overrides the counts.
+// timings block, which takes precedence for output within the same event.
 type llamaServerExtractor struct{}
 
 func (llamaServerExtractor) newParser(path string, start time.Time) usageParser {
@@ -23,8 +23,7 @@ type llamaServerParser struct {
 
 func (p *llamaServerParser) event(ev gjson.Result) {
 	ev = lastArrayElement(ev)
-	p.read(ev, &p.api)
-	p.timings.update(ev.Get("timings"))
+	p.timings.readEvent(ev, p.read, &p.api)
 }
 
 func (p *llamaServerParser) usage() Usage {
@@ -53,26 +52,29 @@ type timingBlock struct {
 	usageBlock
 	wholePrompt, pairedCache int
 	hasWholePrompt           bool
-	output                   gjson.Result
+	processed                gjson.Result
 }
 
-func (b *timingBlock) update(timings gjson.Result) {
+func (b *timingBlock) readEvent(ev gjson.Result, read apiReader, api *apiUsage) {
+	read(ev, api)
+	timings := ev.Get("timings")
 	if !timings.IsObject() {
 		return
 	}
 	b.usageBlock.update(timings, "cache_n")
-	n, hasProcessed := reportedCount(timings.Get("prompt_n"))
-	c, hasCache := reportedCount(timings.Get("cache_n"))
+	processed, cache := timings.Get("prompt_n"), timings.Get("cache_n")
+	n, hasProcessed := reportedCount(processed)
+	c, hasCache := reportedCount(cache)
 	if hasProcessed && hasCache {
 		if total := addCounts(n, c); total >= 0 {
 			b.wholePrompt, b.pairedCache, b.hasWholePrompt = total, c, true
 		}
+	} else if hasProcessed && !cache.Exists() {
+		b.processed = processed
 	}
-	if output := timings.Get("predicted_n"); output.Exists() {
-		if _, ok := reportedCount(output); ok {
-			b.output = output
-		}
-	}
+	// Accumulate output in stream order. Timings win within a frame;
+	// a new API count can still supersede an earlier timing count.
+	setReported(&api.output, timings.Get("predicted_n"))
 }
 
 // applyTimings applies a llama-server timings block. prompt_n counts only
@@ -95,13 +97,13 @@ func applyTimings(u *Usage, block timingBlock) {
 		if u.prompt != promptFull || block.pairedCache <= u.Tokens.InputTokens {
 			u.Tokens.InputTokens, u.prompt = block.wholePrompt, promptFull
 		}
-	} else if n, ok := reportedCount(timings.Get("prompt_n")); ok &&
-		!timings.Get("cache_n").Exists() && u.prompt == promptUnknown && u.Tokens.CachedTokens < 0 {
+	} else if u.prompt == promptUnknown && u.Tokens.CachedTokens < 0 {
 		// Legacy processed-only fallback (e.g. infill). Never add a
 		// cache count from another source/frame to this prompt_n.
-		u.Tokens.InputTokens, u.prompt = n, promptProcessed
+		if setReported(&u.Tokens.InputTokens, block.processed) {
+			u.prompt = promptProcessed
+		}
 	}
-	setReported(&u.Tokens.OutputTokens, block.output)
 	if v := timings.Get("prompt_per_second"); v.Exists() {
 		u.Tokens.PromptPerSecond = v.Float()
 	}

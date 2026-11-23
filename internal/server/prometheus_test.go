@@ -50,6 +50,18 @@ models:
 			}
 			fmt.Fprint(w, `data: {"timings":{"predicted_n":5}}`+"\n\n")
 			fmt.Fprint(w, `data: {"timings":{"prompt_per_second":250,"predicted_per_second":55}}`+"\n\ndata: [DONE]\n\n")
+		case "terminal-usage":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, `data: {"timings":{"predicted_n":3}}`+"\n\n")
+			fmt.Fprint(w, `data: {"usage":{"completion_tokens":5},"timings":{"prompt_per_second":260,"predicted_per_second":56}}`+"\n\ndata: [DONE]\n\n")
+		case "infill-partial-timings":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, `data: {"timings":{"prompt_n":11,"predicted_n":3}}`+"\n\n")
+			fmt.Fprint(w, `data: {"timings":{"prompt_per_second":270,"predicted_per_second":57}}`+"\n\ndata: [DONE]\n\n")
+		case "zero-contradicts-cache":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, `data: {"usage":{"prompt_tokens":10}}`+"\n\n")
+			fmt.Fprint(w, `data: {"usage":{"prompt_tokens":0,"prompt_tokens_details":{"cached_tokens":9}}}`+"\n\ndata: [DONE]\n\n")
 		case "no-text-stream":
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
@@ -174,6 +186,25 @@ models:
 	assert.Contains(t, body, "llamaswap_model_prefill_tokens_per_second{model=\"canonical\"} 250\n")
 	assert.Contains(t, body, "llamaswap_model_generation_tokens_per_second{model=\"canonical\"} 55\n")
 	assert.NotContains(t, body, "model=\"nick\"")
+	for _, tc := range []struct {
+		path, mode                          string
+		in, out, cache, prefill, generation int
+	}{
+		{"/v1/chat/completions", "terminal-usage", 103, 36, 32, 260, 56},
+		{"/infill", "infill-partial-timings", 114, 39, 32, 270, 57},
+		{"/v1/chat/completions", "zero-contradicts-cache", 124, 39, 32, 270, 57},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			post(tc.path, "nick", tc.mode, http.StatusOK)
+			body := scrape()
+			for name, total := range map[string]int{"input": tc.in, "output": tc.out, "cached": tc.cache} {
+				assert.Contains(t, body, fmt.Sprintf("llamaswap_model_%s_tokens_total{model=\"canonical\"} %d\n", name, total))
+			}
+			assert.Contains(t, body, fmt.Sprintf("llamaswap_model_prefill_tokens_per_second{model=\"canonical\"} %d\n", tc.prefill))
+			assert.Contains(t, body, fmt.Sprintf("llamaswap_model_generation_tokens_per_second{model=\"canonical\"} %d\n", tc.generation))
+			assert.NotContains(t, body, "model=\"nick\"")
+		})
+	}
 }
 
 func TestResponseBodyCopier_FirstOutput(t *testing.T) {

@@ -89,14 +89,18 @@ Anthropic reports uncached input, cache reads and cache writes separately;
 llama.cpp timings can report processed prompt tokens alongside cache hits.
 Only a matching pair from the same timings block can be added together.
 A later rate-only frame does not erase an earlier complete prompt count
-or the latest valid output count.
+or the latest valid output count. For output, a later count can replace an
+earlier count from either source; a valid timing count takes precedence
+over API usage in the same frame. API zero placeholders do not replace an
+earlier nonzero count.
 If timings report just processed tokens and no recognized source reports a
 cache count or full prompt total, the processed count is used as a fallback.
 If a cache count is reported separately and the full prompt is unknown,
 the cache count and any valid output still count, but no input is tallied.
 A cache count greater than a known full prompt (including a reported zero)
-is ignored without dropping valid input or output. No inferred token
-counts are added.
+is ignored without dropping valid input or output. API cache counts are
+checked against the prompt total in their own usage block before merging
+with earlier observations. No inferred token counts are added.
 
 Counters are in memory, independent of activity storage and retention.
 They survive backend restarts, unloads and config reloads for canonical IDs

@@ -24,8 +24,7 @@ type radianceParser struct {
 }
 
 func (p *radianceParser) event(ev gjson.Result) {
-	p.read(ev, &p.api)
-	p.timings.update(ev.Get("timings"))
+	p.timings.readEvent(ev, p.read, &p.api)
 }
 
 func (p *radianceParser) usage() Usage {

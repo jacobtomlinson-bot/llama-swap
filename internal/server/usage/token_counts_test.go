@@ -109,3 +109,69 @@ func TestUsage_CompleteCountsAcrossPartialTimingFrames(t *testing.T) {
 		})
 	}
 }
+
+func TestUsage_TimingOutputPrecedence(t *testing.T) {
+	const rates = `{"timings":{"predicted_per_second":56}}`
+	for _, upstream := range []hint.Upstream{hint.Unknown, hint.LlamaServer, hint.Halogen, hint.Radiance, hint.Kyojin} {
+		t.Run(string(upstream), func(t *testing.T) {
+			for _, tc := range []struct {
+				name, first, second string
+				want                int
+			}{
+				{"later API", `{"timings":{"predicted_n":3}}`, `{"usage":{"completion_tokens":5}}`, 5},
+				{"later timings", `{"usage":{"completion_tokens":3}}`, `{"timings":{"predicted_n":5}}`, 5},
+				{"same-frame timings", `{}`, `{"usage":{"completion_tokens":3},"timings":{"predicted_n":5}}`, 5},
+				{"ignore invalid same-frame timings", `{}`, `{"usage":{"completion_tokens":5},"timings":{"predicted_n":-1}}`, 5},
+				{"ignore API zero placeholder", `{"timings":{"predicted_n":5}}`, `{"usage":{"completion_tokens":0}}`, 5},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					u := parseUsageStream(t, upstream, "/v1/chat/completions", tc.first, tc.second, rates)
+					assert.Equal(t, tc.want, u.Tokens.OutputTokens)
+					assert.Equal(t, 56.0, u.Tokens.TokensPerSecond)
+				})
+			}
+		})
+	}
+}
+
+func TestUsage_ProcessedTimingFallbackAcrossFrames(t *testing.T) {
+	const processed = `{"timings":{"prompt_n":11,"predicted_n":3}}`
+	const rates = `{"timings":{"prompt_per_second":270}}`
+	for _, tc := range []struct {
+		name          string
+		frames        []string
+		input, cached int
+	}{
+		{"omitted counts", []string{processed, rates}, 11, -1},
+		{"earlier timing cache", []string{`{"timings":{"cache_n":4}}`, processed, rates}, 0, 4},
+		{"later timing cache", []string{processed, `{"timings":{"cache_n":4}}`, rates}, 0, 4},
+		{"later explicit API cache zero", []string{processed, `{"usage":{"prompt_tokens_details":{"cached_tokens":0}}}`, rates}, 0, 0},
+		{"earlier explicit API prompt zero", []string{`{"usage":{"prompt_tokens":0}}`, processed, rates}, 0, -1},
+		{"later full API input", []string{processed, `{"usage":{"prompt_tokens":7}}`, rates}, 7, -1},
+		{"earlier TensorFold cache", []string{`{"tensorfold":{"cached":4}}`, processed, rates}, 0, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := parseUsageStream(t, hint.Unknown, "/infill", tc.frames...)
+			assert.Equal(t, tc.input, u.Tokens.InputTokens)
+			assert.Equal(t, tc.cached, u.Tokens.CachedTokens)
+			assert.Equal(t, 3, u.Tokens.OutputTokens)
+			assert.Equal(t, 270.0, u.Tokens.PromptPerSecond)
+		})
+	}
+}
+
+func TestUsage_RejectsContradictoryCacheBeforeMerging(t *testing.T) {
+	u := parseUsageStream(t, hint.OpenAI, "/v1/chat/completions",
+		`{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":2}}}`,
+		`{"usage":{"prompt_tokens":0,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":9}}}`)
+	assert.Equal(t, 10, u.Tokens.InputTokens)
+	assert.Equal(t, 5, u.Tokens.OutputTokens)
+	assert.Equal(t, 2, u.Tokens.CachedTokens)
+
+	u = parseUsageStream(t, hint.OpenAI, "/v1/responses",
+		`{"response":{"usage":{"input_tokens":10}}}`,
+		`{"response":{"usage":{"input_tokens":0,"output_tokens":5,"input_tokens_details":{"cached_tokens":9}}}}`)
+	assert.Equal(t, 10, u.Tokens.InputTokens)
+	assert.Equal(t, 5, u.Tokens.OutputTokens)
+	assert.Equal(t, -1, u.Tokens.CachedTokens)
+}
