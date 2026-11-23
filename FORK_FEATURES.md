@@ -95,11 +95,13 @@ and rate-only frames do not overwrite counts. API input/output zero
 placeholders do not replace earlier nonzero counts, but an explicit API
 prompt zero still bounds new cache claims in that frame.
 
-A cache observation must fit both the known whole prompt and any explicit
-API prompt total in its own frame. An impossible cache count is ignored,
-along with any prompt total derived from that count, without discarding a
-previous compatible cache count. A new whole prompt supersedes earlier
-prompt totals and clears an earlier cache count that no longer fits.
+A cache-only observation must fit the retained whole prompt, if known, and
+any explicit API prompt total in its own frame. A complete timings pair
+supplies a new whole prompt and cache count together: it can replace an
+older, smaller total, but its cache count must still fit any explicit API
+prompt total in that same frame. An impossible cache update or derived
+total is ignored without discarding a previous compatible cache count.
+A new whole prompt clears any earlier cache count that no longer fits.
 
 If no recognized source reports a cache count or full prompt total, a
 processed-only count can be used as a fallback even across later rate-only

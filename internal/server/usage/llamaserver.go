@@ -66,16 +66,19 @@ func (b *timingBlock) update(timings gjson.Result, api *apiUsage, frameInput int
 	// portion. The pair is required to derive the whole prompt.
 	n, hasProcessed := reportedCount(processed)
 	c, hasCache := reportedCount(cache)
-	if hasCache && api.cacheFits(c, frameInput) {
-		// A full timings prompt must come from a single block. An
-		// impossible cache observation also invalidates its derived total.
-		if hasProcessed {
-			if total := addCounts(n, c); total >= 0 {
-				api.recordFullPrompt(total)
-			}
+	switch {
+	case hasProcessed && hasCache:
+		// A complete pair is a new prompt observation. Check the cache
+		// against any explicit API total in this frame, not an old
+		// prompt this pair is about to replace.
+		if total := addCounts(n, c); total >= 0 && (frameInput < 0 || c <= frameInput) {
+			api.recordFullPrompt(total)
+			api.cached = c
 		}
+	case hasCache:
+		// Without a pair, a cache update must fit the retained prompt.
 		api.recordCache(c, frameInput)
-	} else if hasProcessed && !cache.Exists() {
+	case hasProcessed && !cache.Exists():
 		b.processed = processed
 	}
 	// Accumulate output in stream order. Timings win within a frame;

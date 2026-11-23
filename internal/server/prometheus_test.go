@@ -41,6 +41,8 @@ models:
 	}{
 		{"reject-api-cache-only", []string{validAPI, `{"usage":{"prompt_tokens_details":{"cached_tokens":11}}}`}, 10, 3, 2},
 		{"reject-timing-cache-only", []string{validAPI, `{"timings":{"cache_n":11}}`}, 10, 3, 2},
+		{"timing-pair-after-smaller-api-prompt", []string{`{"usage":{"prompt_tokens":2,"prompt_tokens_details":{"cached_tokens":1}}}`, validTiming, validTiming}, 15, 3, 4},
+		{"timing-pair-after-api-zero", []string{`{"usage":{"prompt_tokens":0,"prompt_tokens_details":{"cached_tokens":0}}}`, validTiming, validTiming}, 15, 3, 4},
 		{"later-api-complete", []string{validTiming, terminalAPI, terminalAPI}, 20, 5, 6},
 		{"later-timing-complete", []string{terminalAPI, validTiming, validTiming}, 15, 3, 4},
 		{"reject-timing-cache-with-api-zero", []string{validAPI, `{"usage":{"prompt_tokens":0},"timings":{"cache_n":9}}`}, 10, 3, 2},

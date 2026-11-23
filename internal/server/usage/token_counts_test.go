@@ -1,6 +1,8 @@
 package usage
 
 import (
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -32,7 +34,7 @@ func TestUsage_ReportedTokenCounts(t *testing.T) {
 			`{"timings":{"prompt_n":2,"predicted_n":3}}`, 2, 3, -1},
 		{"zero matched timing cache is valid", "/infill",
 			`{"timings":{"prompt_n":2,"cache_n":0,"predicted_n":3}}`, 2, 3, 0},
-		{"timings cannot replace known total with an impossible cache count", "/completion",
+		{"timings cannot replace a same-frame API total with an impossible cache count", "/completion",
 			`{"usage":{"prompt_tokens":2,"completion_tokens":3},"timings":{"prompt_n":2,"cache_n":9}}`, 2, 3, -1},
 		{"llama timings include cached tokens", "/completion",
 			`{"timings":{"prompt_n":10,"cache_n":2,"predicted_n":5}}`, 12, 5, 2},
@@ -103,9 +105,9 @@ func TestUsage_CompleteCountsAcrossPartialTimingFrames(t *testing.T) {
 
 			u = parseUsageStream(t, upstream, "/v1/chat/completions",
 				`{"usage":{"prompt_tokens":2}}`, complete, rates)
-			assert.Equal(t, 2, u.Tokens.InputTokens)
+			assert.Equal(t, 15, u.Tokens.InputTokens)
 			assert.Equal(t, 3, u.Tokens.OutputTokens)
-			assert.Equal(t, -1, u.Tokens.CachedTokens)
+			assert.Equal(t, 4, u.Tokens.CachedTokens)
 		})
 	}
 }
@@ -193,6 +195,10 @@ func TestUsage_TokenObservationOrder(t *testing.T) {
 			}{
 				{"API after timing", []string{timing, api}, 20, 5, 6},
 				{"timing after API", []string{api, timing}, 15, 3, 4},
+				{"pair after smaller API total", []string{`{"usage":{"prompt_tokens":2,"prompt_tokens_details":{"cached_tokens":1}}}`, timing}, 15, 3, 4},
+				{"pair after earlier API zero", []string{apiZero, timing}, 15, 3, 4},
+				{"pair with same-frame API zero", []string{api, `{"usage":{"prompt_tokens":0},"timings":{"prompt_n":11,"cache_n":4,"predicted_n":3}}`}, 20, 3, 6},
+				{"overflowing pair does not update the cache", []string{api, fmt.Sprintf(`{"timings":{"prompt_n":%d,"cache_n":1,"predicted_n":3}}`, math.MaxInt)}, 20, 3, 6},
 				{"same-frame backend precedence", []string{same}, 15, 3, 4},
 				{"cache before prompt, compatible", []string{`{"timings":{"cache_n":4}}`, `{"usage":{"prompt_tokens":7}}`}, 7, 0, 4},
 				{"cache before prompt, incompatible", []string{`{"timings":{"cache_n":8}}`, `{"usage":{"prompt_tokens":7}}`}, 7, 0, -1},
