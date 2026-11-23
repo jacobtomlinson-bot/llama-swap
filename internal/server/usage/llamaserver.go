@@ -7,7 +7,7 @@ import (
 )
 
 // llamaServerExtractor reads the API usage block plus llama-server's
-// timings block, which takes precedence for output within the same event.
+// timings block, whose valid counts take precedence within the same event.
 type llamaServerExtractor struct{}
 
 func (llamaServerExtractor) newParser(path string, start time.Time) usageParser {
@@ -45,30 +45,36 @@ func lastArrayElement(ev gjson.Result) gjson.Result {
 	return arr[len(arr)-1]
 }
 
-// timingBlock retains token observations independently of the latest
-// timings block. A whole prompt must come from one frame, never from
-// combining a processed count and a cache count reported separately.
+// timingBlock keeps the latest performance data and a processed-only
+// fallback. It merges validated token counts into apiUsage as frames arrive.
 type timingBlock struct {
-	usageBlock
-	wholePrompt, pairedCache int
-	hasWholePrompt           bool
-	processed                gjson.Result
+	last, processed gjson.Result
 }
 
 func (b *timingBlock) readEvent(ev gjson.Result, read apiReader, api *apiUsage) {
-	read(ev, api)
-	timings := ev.Get("timings")
+	frameInput := read(ev, api)
+	b.update(ev.Get("timings"), api, frameInput)
+}
+
+func (b *timingBlock) update(timings gjson.Result, api *apiUsage, frameInput int) {
 	if !timings.IsObject() {
 		return
 	}
-	b.usageBlock.update(timings, "cache_n")
+	b.last = timings
 	processed, cache := timings.Get("prompt_n"), timings.Get("cache_n")
+	// prompt_n counts processed tokens only; cache_n is the reused
+	// portion. The pair is required to derive the whole prompt.
 	n, hasProcessed := reportedCount(processed)
 	c, hasCache := reportedCount(cache)
-	if hasProcessed && hasCache {
-		if total := addCounts(n, c); total >= 0 {
-			b.wholePrompt, b.pairedCache, b.hasWholePrompt = total, c, true
+	if hasCache && api.cacheFits(c, frameInput) {
+		// A full timings prompt must come from a single block. An
+		// impossible cache observation also invalidates its derived total.
+		if hasProcessed {
+			if total := addCounts(n, c); total >= 0 {
+				api.recordFullPrompt(total)
+			}
 		}
+		api.recordCache(c, frameInput)
 	} else if hasProcessed && !cache.Exists() {
 		b.processed = processed
 	}
@@ -77,29 +83,18 @@ func (b *timingBlock) readEvent(ev gjson.Result, read apiReader, api *apiUsage) 
 	setReported(&api.output, timings.Get("predicted_n"))
 }
 
-// applyTimings applies a llama-server timings block. prompt_n counts only
-// the prompt tokens processed and cache_n the ones reused from the cache, so
-// the whole prompt is prompt_n + cache_n (the same number usage.prompt_tokens
-// reports). predicted_n is the output count, prompt_per_second and
-// predicted_per_second the rates, prompt_ms + predicted_ms the duration
-// (when longer than wall time), and draft_n / draft_n_accepted the
-// speculative decoding counters.
+// applyTimings adds the processed-only fallback and the final rates,
+// duration, and speculative decoding counts. Ordinary token counts were
+// already merged in event order by update.
 func applyTimings(u *Usage, block timingBlock) {
 	timings := block.last
 	if !timings.Exists() {
 		return
 	}
 	u.Found = true
-	setReported(&u.Tokens.CachedTokens, block.cache)
-	if block.hasWholePrompt {
-		// A matched pair can refine the total, unless its cache count
-		// contradicts an already known full prompt.
-		if u.prompt != promptFull || block.pairedCache <= u.Tokens.InputTokens {
-			u.Tokens.InputTokens, u.prompt = block.wholePrompt, promptFull
-		}
-	} else if u.prompt == promptUnknown && u.Tokens.CachedTokens < 0 {
-		// Legacy processed-only fallback (e.g. infill). Never add a
-		// cache count from another source/frame to this prompt_n.
+	if u.prompt == promptUnknown && u.Tokens.CachedTokens < 0 {
+		// Never add cache reported by another source or frame to the
+		// legacy processed-only fallback (e.g. infill).
 		if setReported(&u.Tokens.InputTokens, block.processed) {
 			u.prompt = promptProcessed
 		}

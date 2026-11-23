@@ -29,9 +29,39 @@ models:
     cmd: unused -port ${PORT}
 `))
 	require.NoError(t, err)
+	const (
+		validAPI    = `{"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":2}}}`
+		validTiming = `{"timings":{"prompt_n":11,"cache_n":4,"predicted_n":3}}`
+		terminalAPI = `{"usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":6}}}`
+	)
+	cases := []struct {
+		mode                  string
+		frames                []string
+		input, output, cached int
+	}{
+		{"reject-api-cache-only", []string{validAPI, `{"usage":{"prompt_tokens_details":{"cached_tokens":11}}}`}, 10, 3, 2},
+		{"reject-timing-cache-only", []string{validAPI, `{"timings":{"cache_n":11}}`}, 10, 3, 2},
+		{"later-api-complete", []string{validTiming, terminalAPI, terminalAPI}, 20, 5, 6},
+		{"later-timing-complete", []string{terminalAPI, validTiming, validTiming}, 15, 3, 4},
+		{"reject-timing-cache-with-api-zero", []string{validAPI, `{"usage":{"prompt_tokens":0},"timings":{"cache_n":9}}`}, 10, 3, 2},
+		{"reject-timing-pair-with-api-zero", []string{validAPI, `{"usage":{"prompt_tokens":0},"timings":{"prompt_n":0,"cache_n":9}}`}, 10, 3, 2},
+		{"accept-explicit-cache-zero", []string{validAPI, `{"timings":{"cache_n":0}}`}, 10, 3, 0},
+		{"ignore-invalid-counts", []string{validAPI, `{"usage":{"prompt_tokens":-1},"timings":{"prompt_n":-1,"cache_n":-1,"predicted_n":-1}}`}, 10, 3, 2},
+	}
 	local := newStubRouter([]string{"canonical", "other", "not-configured"}, "")
 	local.serveHTTP = func(w http.ResponseWriter, r *http.Request) {
-		switch r.Header.Get("X-Test-Mode") {
+		mode := r.Header.Get("X-Test-Mode")
+		for _, tc := range cases {
+			if tc.mode == mode {
+				w.Header().Set("Content-Type", "text/event-stream")
+				for _, frame := range tc.frames {
+					fmt.Fprintf(w, "data: %s\n\n", frame)
+				}
+				fmt.Fprint(w, `data: {"timings":{"prompt_per_second":280,"predicted_per_second":58}}`+"\n\ndata: [DONE]\n\n")
+				return
+			}
+		}
+		switch mode {
 		case "stream":
 			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 			fmt.Fprint(w, ": keepalive\r\n\r\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\r\n\r\n")
@@ -202,6 +232,28 @@ models:
 			}
 			assert.Contains(t, body, fmt.Sprintf("llamaswap_model_prefill_tokens_per_second{model=\"canonical\"} %d\n", tc.prefill))
 			assert.Contains(t, body, fmt.Sprintf("llamaswap_model_generation_tokens_per_second{model=\"canonical\"} %d\n", tc.generation))
+			assert.NotContains(t, body, "model=\"nick\"")
+		})
+	}
+	counter := func(t *testing.T, body, name string) int {
+		t.Helper()
+		_, value, ok := strings.Cut(body, fmt.Sprintf("llamaswap_model_%s_tokens_total{model=\"canonical\"} ", name))
+		require.True(t, ok, "missing canonical %s counter", name)
+		var total int
+		_, err := fmt.Sscanf(value, "%d", &total)
+		require.NoError(t, err)
+		return total
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			before := scrape()
+			post("/v1/chat/completions", "nick", tc.mode, http.StatusOK)
+			body := scrape()
+			for name, delta := range map[string]int{"input": tc.input, "output": tc.output, "cached": tc.cached} {
+				assert.Equal(t, delta, counter(t, body, name)-counter(t, before, name), "%s increment", name)
+			}
+			assert.Contains(t, body, "llamaswap_model_prefill_tokens_per_second{model=\"canonical\"} 280\n")
+			assert.Contains(t, body, "llamaswap_model_generation_tokens_per_second{model=\"canonical\"} 58\n")
 			assert.NotContains(t, body, "model=\"nick\"")
 		})
 	}
